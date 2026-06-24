@@ -1,0 +1,12 @@
+# infrastructure/talos/clusterconfig/ — generated Talos machine configs contain secrets
+infrastructure/talos/clusterconfig/
+
+# Terraform state and local overrides
+infrastructure/terraform/**/.terraform/
+infrastructure/terraform/**/terraform.tfstate
+infrastructure/terraform/**/terraform.tfstate.backup
+infrastructure/terraform/**/*.tfvars
+!infrastructure/terraform/**/*.tfvars.example
+
+# age private key — never commit
+*.agekey
