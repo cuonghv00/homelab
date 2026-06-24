@@ -10,3 +10,6 @@ infrastructure/terraform/**/*.tfvars
 
 # age private key — never commit
 *.agekey
+
+# SDD scratch dir — generated files, review packages, task briefs
+.superpowers/
