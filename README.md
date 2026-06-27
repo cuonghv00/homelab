@@ -18,7 +18,9 @@ This README is a **manual rebuild runbook** — you can re-create the whole thin
    CNI: Cilium 1.17 (eBPF, kube-proxy replaced) + Hubble
    GitOps: Flux v2  ── watches main ──►  kubernetes/
    Secrets: SOPS + age
-   Access: Tailscale operator → grafana.<tailnet>.ts.net, hubble.<tailnet>.ts.net
+   Access: Cilium LoadBalancer (LB-IPAM + L2) on the LAN —
+           Grafana http://192.168.10.240, Hubble http://192.168.10.241
+           (reachable off-LAN via the Proxmox Tailscale subnet router)
 
    Observability:
      Grafana ── Prometheus (metrics) ── node-exporter / kube-state-metrics
@@ -161,11 +163,18 @@ export SOPS_AGE_KEY_FILE="$PWD/homelab.agekey"
    `kubectl create secret ... --dry-run=client -o yaml | sops --encrypt /dev/stdin > <path>.sops.yaml`.
 
 ### Phase 3 — Access + alerting
-9. **Tailscale** — create OAuth client (Trust credentials page) with **Devices Core: Write + Auth Keys: Write**, tagged `tag:k8s-operator`. In **Access Controls** add:
-   ```json
-   "tagOwners": { "tag:k8s-operator": ["tag:k8s-operator"], "tag:k8s": ["tag:k8s-operator"] }
-   ```
-   Enable **MagicDNS + HTTPS** (DNS tab). Services annotated `tailscale.com/expose: "true"` get a `*.ts.net` hostname.
+9. **Remote access — Cilium LoadBalancer (NOT the Tailscale operator).** The
+   Tailscale operator's ingress proxy needs kernel iptables-NAT, which Talos
+   + Cilium (kube-proxy-replacement) does not provide, and userspace mode
+   rejects `TS_DEST_IP` — so operator-based `*.ts.net` exposure does not work
+   here (see Gotchas). Instead, expose via Cilium LB-IPAM + L2 on the LAN
+   (`kubernetes/platform/cilium/`): a `CiliumLoadBalancerIPPool` (`.240-.245`),
+   a `CiliumL2AnnouncementPolicy` (NIC `ens18`), a Lease RBAC Role, and
+   `type: LoadBalancer` Services for Grafana (`.240`) and Hubble (`.241`).
+   Requires `enable-l2-announcements=true` in Cilium (set in the Talos
+   cilium-install patch). The Proxmox host's Tailscale **subnet router**
+   (192.168.10.0/24) makes these LAN IPs reachable from any Tailscale device
+   that runs `tailscale up --accept-routes`.
 10. **Telegram** — @BotFather bot token + your chat id (`https://api.telegram.org/bot<TOKEN>/getUpdates`).
 
 ---
@@ -185,7 +194,8 @@ export SOPS_AGE_KEY_FILE="$PWD/homelab.agekey"
 - **Vector chart** runs Helm `tpl()` over `customConfig`, mangling Vector's VRL `{{ field }}` templates → use a pre-rendered ConfigMap via `existingConfigMaps`.
 - **Tempo query API is on :3200** (not :3100; that's Loki). Grafana's Tempo datasource URL uses :3200.
 - **cert-manager `servicemonitor.enabled` must be false** until kube-prometheus-stack installs the ServiceMonitor CRD, or the HelmRelease fails.
-- **Tailscale operator** mints its own identity key tagged `tag:k8s-operator` → that tag must be **self-owned** in `tagOwners`, and the OAuth client must have **Auth Keys: Write** + the tag. The OAuth clients page is under **Trust credentials** now.
+- **Tailscale operator ingress does NOT work on Talos+Cilium.** The operator's expose proxy runs in kernel mode and needs iptables-NAT (DNAT); Talos with Cilium kube-proxy-replacement doesn't load the nat modules, so the proxy registers + answers tailnet ping but TCP times out (`nat: Table does not exist`). Userspace mode is incompatible (`TS_DEST_IP is not supported with TS_USERSPACE`). → We expose via **Cilium LoadBalancer (LB-IPAM + L2 announcements)** on the LAN instead, reached remotely through the Proxmox Tailscale subnet router. (If you ever DO want the operator: still note it mints a self-key tagged `tag:k8s-operator`, so that tag must be **self-owned** in `tagOwners` and the OAuth client — under **Trust credentials** — needs **Auth Keys: Write** + the tag.)
+- **Cilium L2 announcements need Lease RBAC + the enable flag.** Enabling `enable-l2-announcements` alone isn't enough if Cilium was installed without it: the cilium ServiceAccount lacks `coordination.k8s.io/leases` perms → "cannot get resource leases ... forbidden" and LB IPs never get ARP-announced. Add a Lease Role/RoleBinding (see `kubernetes/platform/cilium/l2-leases-rbac.yaml`), or install Cilium with `l2announcements.enabled=true` so the chart adds it. Note: ICMP ping to a LoadBalancer VIP isn't answered — test with `curl`, not `ping`.
 - **Alertmanager + kube-prometheus-stack:** when you override `alertmanager.config`, Helm *replaces* the `receivers` list but *merges* `route` — so the chart's default `Watchdog → "null"` route can survive while the `null` receiver is dropped → "undefined receiver null". Always define a `null` receiver (and route Watchdog to it to silence it).
 - **Secrets:** never commit `homelab.agekey`, `terraform.tfvars`, or `clusterconfig/` (all gitignored). All `*.sops.yaml` must show `ENC[...]`. `.sops.yaml` itself is plaintext config (public key) — that's correct.
 
@@ -206,10 +216,15 @@ flux reconcile kustomization monitoring --with-source   # force a sync
 # edit an encrypted secret in place
 sops kubernetes/<path>/<name>.sops.yaml              # decrypts in $EDITOR, re-encrypts on save
 
-# access (from any Tailscale device with MagicDNS)
-https://grafana.<tailnet>.ts.net     # Grafana (admin / secret: kube-prometheus-stack-grafana)
-https://hubble.<tailnet>.ts.net      # Hubble network flows
-# or locally:
+# access — Cilium LoadBalancer IPs on the LAN (http, not https)
+http://192.168.10.240    # Grafana  (admin / secret: kube-prometheus-stack-grafana)
+http://192.168.10.241    # Hubble UI
+#   - on the LAN: works directly.
+#   - remote Tailscale device: enable `tailscale up --accept-routes` so the
+#     Proxmox subnet router's 192.168.10.0/24 route is used.
+# admin password:
+kubectl -n monitoring get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+# or just port-forward:
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
 ```
 
