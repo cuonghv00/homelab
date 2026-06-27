@@ -74,3 +74,7 @@ cluster:
                     - --set=hubble.ui.enabled=true
                     - --set=k8sServiceHost=localhost
                     - --set=k8sServicePort=7445
+                    # LB-IPAM + L2 announcements for type=LoadBalancer Services on the LAN
+                    # (Cilium replaces kube-proxy; no MetalLB). On the live cluster this was
+                    # also enabled via the cilium-config ConfigMap; here for rebuild parity.
+                    - --set=l2announcements.enabled=true

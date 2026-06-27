@@ -4,4 +4,4 @@ resources:
   - namespace.yaml
   - alertmanager-secret.sops.yaml
   - helmrelease.yaml
-  - grafana-tailscale.yaml
+  - grafana-lb.yaml

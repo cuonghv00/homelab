@@ -1,0 +1,17 @@
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: lan-l2
+spec:
+  # Answer ARP for LoadBalancer IPs on the LAN NIC so the .240-.245 pool is
+  # reachable on the L2 segment (no BGP/router config needed).
+  # Requires cilium config enable-l2-announcements=true (set on the cluster;
+  # also added to the Talos controlplane Cilium-install patch for rebuilds).
+  loadBalancerIPs: true
+  interfaces:
+    - "^ens18$"   # Talos VM LAN NIC
+  nodeSelector:
+    matchExpressions:
+      - key: kubernetes.io/os
+        operator: In
+        values: ["linux"]
