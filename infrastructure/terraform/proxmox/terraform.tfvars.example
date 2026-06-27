@@ -1,0 +1,10 @@
+# infrastructure/terraform/proxmox/terraform.tfvars.example
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+proxmox_endpoint   = "https://192.168.10.X:8006/"
+proxmox_api_token  = "terraform@pve!provider=00000000-0000-0000-0000-000000000000"
+proxmox_node       = "pve"
+vm_datastore       = "local-lvm"
+iso_datastore      = "local"
+network_bridge     = "vmbr0"
+talos_schematic_id = "REPLACE_WITH_SCHEMATIC_ID_FROM_TASK2"
+talos_version      = "v1.13.5"
