@@ -20,6 +20,12 @@ spec:
     image:
       repository: otel/opentelemetry-collector-contrib
     mode: deployment
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
     config:
       extensions:
         health_check:

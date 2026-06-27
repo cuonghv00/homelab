@@ -18,6 +18,12 @@ spec:
         namespace: flux-system
   values:
     role: Agent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
     # Use a pre-rendered ConfigMap to avoid Helm tpl() processing {{ }} field
     # template expressions in the Vector config as Go template calls.
     existingConfigMaps:

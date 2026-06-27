@@ -19,6 +19,12 @@ spec:
   values:
     tempo:
       retention: 168h
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
       storage:
         trace:
           backend: local

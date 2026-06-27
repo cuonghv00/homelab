@@ -40,6 +40,12 @@ spec:
         delete_request_store: filesystem
     singleBinary:
       replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
       persistence:
         enabled: true
         storageClass: local-path
