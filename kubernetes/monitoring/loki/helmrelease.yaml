@@ -54,6 +54,11 @@ spec:
     # Disable Loki's built-in gateway/nginx
     gateway:
       enabled: false
+    # Disable memcached caches (insufficient cluster memory for homelab)
+    chunksCache:
+      enabled: false
+    resultsCache:
+      enabled: false
     # ServiceMonitor for Prometheus scraping
     monitoring:
       serviceMonitor:
