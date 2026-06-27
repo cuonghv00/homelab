@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hubble-ui-tailscale
+  namespace: kube-system
+  annotations:
+    tailscale.com/expose: "true"
+    tailscale.com/hostname: hubble
+spec:
+  selector:
+    k8s-app: hubble-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8081
+  type: ClusterIP
