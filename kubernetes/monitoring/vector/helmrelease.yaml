@@ -26,3 +26,8 @@ spec:
     # Disable the Service since Vector Agent only pushes to Loki (no inbound)
     service:
       enabled: false
+    # Tolerate control-plane taint so Vector runs on all 3 nodes
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
