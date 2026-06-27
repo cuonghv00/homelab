@@ -19,6 +19,16 @@
 - Storage class: `local-path` (default) for all PVCs
 - Namespaces: `flux-system`, `kube-system` (Cilium), `cert-manager`, `tailscale`, `monitoring`
 - Flux sync interval: `10m` for platform components, `5m` for monitoring
+- **Talos Pod Security (cluster-wide gotcha):** Talos enforces the `baseline` PSA on
+  all non-exempt namespaces. Any namespace whose pods need hostPath/hostNetwork/hostPort
+  (e.g. `local-path-storage` helper pods, `monitoring` node-exporter/Vector) MUST be
+  labeled `pod-security.kubernetes.io/{enforce,audit,warn}: privileged`, or pods/PVC
+  provisioning are rejected at admission.
+- **local-path + non-root + subPath (gotcha):** local-path is hostPath-backed and does
+  NOT honor `fsGroup`; a non-root workload mounting its data dir via subPath crashes with
+  "permission denied" (kubelet makes the subPath dir root:root). Add a root `chown`
+  initContainer (see kube-prometheus-stack `prometheus.prometheusSpec.initContainers`).
+  Watch for this in Loki/Tempo too.
 
 ---
 
