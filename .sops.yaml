@@ -1,0 +1,7 @@
+# .sops.yaml
+creation_rules:
+  - path_regex: kubernetes/.*\.sops\.yaml
+    encrypted_regex: ^(data|stringData)$
+    age: age100gaz55vrmymru2n7a6tfp27m4706wu88scgp3xemlerr9f6lffsrflhw0
+  - path_regex: infrastructure/talos/talsecret\.sops\.yaml
+    age: age100gaz55vrmymru2n7a6tfp27m4706wu88scgp3xemlerr9f6lffsrflhw0
