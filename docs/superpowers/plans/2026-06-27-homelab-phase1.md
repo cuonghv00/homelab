@@ -471,13 +471,14 @@ nodes:
 
 ```yaml
 # infrastructure/talos/patches/all-nodes.yaml
-- op: add
-  path: /machine/sysctls
-  value:
+# Strategic-merge patch (NOT JSON6902): talhelper 3.x + Talos 1.13 render
+# multi-document machine configs, which reject RFC6902 op/path/value patches.
+machine:
+  sysctls:
     net.core.bpf_jit_harden: "1"
-- op: replace
-  path: /cluster/proxy/disabled
-  value: true
+cluster:
+  proxy:
+    disabled: true
 ```
 
 (CNI is set to `none` via `cniConfig` in talconfig.yaml, so no patch needed for it.)
@@ -486,9 +487,9 @@ nodes:
 
 ```yaml
 # infrastructure/talos/patches/controlplane.yaml
-- op: add
-  path: /cluster/inlineManifests
-  value:
+# Strategic-merge patch (NOT JSON6902) — see all-nodes.yaml note.
+cluster:
+  inlineManifests:
     - name: cilium-install
       contents: |
         ---
