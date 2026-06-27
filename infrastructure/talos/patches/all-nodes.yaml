@@ -1,0 +1,8 @@
+# infrastructure/talos/patches/all-nodes.yaml
+# Strategic merge patch format (required for talhelper 3.x multi-document configs)
+machine:
+  sysctls:
+    net.core.bpf_jit_harden: "1"
+cluster:
+  proxy:
+    disabled: true
