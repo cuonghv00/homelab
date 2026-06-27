@@ -116,7 +116,17 @@ spec:
           group_interval: 5m
           repeat_interval: 12h
           receiver: telegram
+          routes:
+            # Blackhole the always-firing Watchdog (pipeline-health signal) so it
+            # doesn't spam Telegram every repeat_interval. Defining the "null"
+            # receiver is also REQUIRED: the chart's default route references it,
+            # and Helm replaces (not merges) the receivers list, so it must be
+            # declared here or the operator rejects the config ("undefined receiver null").
+            - receiver: "null"
+              matchers:
+                - alertname = "Watchdog"
         receivers:
+          - name: "null"
           - name: telegram
             telegram_configs:
               - bot_token_file: /etc/alertmanager/secrets/alertmanager-telegram/telegram_bot_token
