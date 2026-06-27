@@ -3,7 +3,7 @@ locals {
   iso_url = "https://factory.talos.dev/image/${var.talos_schematic_id}/${var.talos_version}/metal-amd64.iso"
 
   nodes = {
-    "talos-cp-01" = { vmid = 101, cores = 4, memory = 4096,  disk = 50,  ip = "192.168.10.101" }
+    "talos-cp-01" = { vmid = 101, cores = 4, memory = 6144,  disk = 50,  ip = "192.168.10.101" }
     "talos-w-01"  = { vmid = 102, cores = 4, memory = 8192,  disk = 150, ip = "192.168.10.102" }
     "talos-w-02"  = { vmid = 103, cores = 4, memory = 8192,  disk = 150, ip = "192.168.10.103" }
   }
