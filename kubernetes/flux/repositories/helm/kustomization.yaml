@@ -6,3 +6,4 @@ resources:
   - vector.yaml
   - cert-manager.yaml
   - tailscale.yaml
+  - local-path.yaml
