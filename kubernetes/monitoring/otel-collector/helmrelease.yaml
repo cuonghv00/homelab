@@ -17,8 +17,13 @@ spec:
         name: opentelemetry
         namespace: flux-system
   values:
+    image:
+      repository: otel/opentelemetry-collector-contrib
     mode: deployment
     config:
+      extensions:
+        health_check:
+          endpoint: ${env:MY_POD_IP}:13133
       receivers:
         otlp:
           protocols:
@@ -39,6 +44,7 @@ spec:
           tls:
             insecure: true
       service:
+        extensions: [health_check]
         pipelines:
           traces:
             receivers: [otlp]
