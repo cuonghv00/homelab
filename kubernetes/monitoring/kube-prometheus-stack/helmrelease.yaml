@@ -61,7 +61,33 @@ spec:
         storageClassName: local-path
         size: 1Gi
       # Datasources added in Task 12
-      additionalDataSources: []
+      additionalDataSources:
+        - name: Loki
+          type: loki
+          uid: loki
+          url: http://loki.monitoring.svc.cluster.local:3100
+          access: proxy
+          isDefault: false
+          jsonData:
+            derivedFields:
+              - datasourceUid: Tempo
+                matcherRegex: '"traceID":"(\w+)"'
+                name: TraceID
+                url: "${__value.raw}"
+        - name: Tempo
+          type: tempo
+          uid: Tempo
+          url: http://tempo.monitoring.svc.cluster.local:3100
+          access: proxy
+          isDefault: false
+          jsonData:
+            httpMethod: GET
+            serviceMap:
+              datasourceUid: prometheus
+            nodeGraph:
+              enabled: true
+            lokiSearch:
+              datasourceUid: loki
       sidecar:
         dashboards:
           enabled: true
