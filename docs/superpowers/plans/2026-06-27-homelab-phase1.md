@@ -354,11 +354,14 @@ creation_rules:
 - [ ] **Step 3: Generate and encrypt the Talos secret bundle**
 
 ```bash
-export SOPS_AGE_KEY_FILE="$(git rev-parse --show-toplevel)/homelab.agekey"
+cd "$(git rev-parse --show-toplevel)"
+export SOPS_AGE_KEY_FILE="$(pwd)/homelab.agekey"
 mkdir -p infrastructure/talos
-cd infrastructure/talos
-talhelper gensecret > talsecret.sops.yaml      # plaintext at this point
-sops --encrypt --in-place talsecret.sops.yaml  # encrypts using .sops.yaml rule
+talhelper gensecret > infrastructure/talos/talsecret.sops.yaml   # plaintext at this point
+# Run sops from the REPO ROOT with the full repo-relative path so the
+# .sops.yaml path_regex (infrastructure/talos/talsecret\.sops\.yaml) matches.
+# If sops errors "no matching creation rules", the path/regex don't agree — do not proceed.
+sops --encrypt --in-place infrastructure/talos/talsecret.sops.yaml
 ```
 
 - [ ] **Step 4: Verify encryption (must show ENC[...] / no plaintext keys)**
