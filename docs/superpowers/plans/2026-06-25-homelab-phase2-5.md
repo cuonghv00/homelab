@@ -840,7 +840,7 @@ spec:
   chart:
     spec:
       chart: cert-manager
-      version: "v1.16.x"
+      version: "v1.20.3"   # verify latest: helm search repo jetstack/cert-manager
       sourceRef:
         kind: HelmRepository
         name: cert-manager
@@ -851,7 +851,9 @@ spec:
     prometheus:
       enabled: true
       servicemonitor:
-        enabled: true
+        # MUST stay false until Task 9 installs the ServiceMonitor CRD;
+        # enabling it before the Prometheus operator CRDs exist fails the HelmRelease.
+        enabled: false
 ```
 
 ```yaml
