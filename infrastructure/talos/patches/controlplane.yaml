@@ -46,6 +46,12 @@ cluster:
                 - name: cilium-install
                   image: quay.io/cilium/cilium-cli-ci:latest
                   env:
+                    # These env vars are how the cilium-cli process itself reaches
+                    # kube-apiserver to run the install (hostNetwork=true, so podIP is
+                    # the node IP; 6443 is the real apiserver port). This is distinct
+                    # from --set=k8sServiceHost/Port=localhost:7445 below, which tells
+                    # the installed Cilium agents to use Talos's KubePrism (7445) so
+                    # they don't depend on kube-proxy.
                     - name: KUBERNETES_SERVICE_HOST
                       valueFrom:
                         fieldRef:
