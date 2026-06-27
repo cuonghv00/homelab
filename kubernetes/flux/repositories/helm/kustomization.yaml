@@ -7,3 +7,4 @@ resources:
   - cert-manager.yaml
   - tailscale.yaml
   - local-path.yaml
+  - opentelemetry.yaml
