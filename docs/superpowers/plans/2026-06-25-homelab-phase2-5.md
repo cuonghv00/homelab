@@ -507,9 +507,22 @@ kind: Kustomization
 resources:
   - gotk-components.yaml
   - gotk-sync.yaml
-  - ../repositories
+  - ../../repositories   # repositories dir is kubernetes/flux/repositories (two levels up)
   - ../platform.yaml
   - ../monitoring.yaml
+```
+
+Also create `kubernetes/flux/bootstrap/kustomization.yaml` so the Flux sync root
+(`path: ./kubernetes/flux/bootstrap`) has an explicit entry point and does NOT
+auto-glob the loose `platform.yaml`/`monitoring.yaml` (which would double-include
+them via `flux-system/kustomization.yaml` and cause a resource-ID collision):
+
+```yaml
+# kubernetes/flux/bootstrap/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - flux-system
 ```
 
 - [ ] **Step 5: Create stub kustomization.yaml files so Flux doesn't error on empty dirs**
