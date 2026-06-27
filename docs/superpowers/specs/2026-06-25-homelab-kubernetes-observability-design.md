@@ -19,10 +19,10 @@
 
 | Item | Spec |
 |---|---|
-| Machine | Beelink GTR7 (AMD 7840 HS) |
-| RAM | 32 GB |
-| Storage | 512 GB SSD |
-| Hypervisor | Proxmox (already installed) |
+| Machine | Beelink GTR7 (AMD 7840HS, 16 threads / 8 cores) |
+| RAM | 32 GB physical — **27.13 GiB available to Proxmox** (~5 GB reserved by AMD Radeon 780M iGPU) |
+| Storage | 512 GB SSD (Proxmox root uses ~94 GiB; ~418 GiB available for VM disks) |
+| Hypervisor | Proxmox VE 9.1.1, kernel 6.17.2-1-pve, EFI boot |
 | VPN | Tailscale (already installed on Proxmox host) |
 
 ---
@@ -33,12 +33,14 @@
 
 | Node | Role | vCPU | RAM | Disk |
 |---|---|---|---|---|
-| `talos-cp-01` | Control Plane | 4 | 6 GB | 50 GB |
-| `talos-w-01` | Worker 1 | 4 | 10 GB | 150 GB |
-| `talos-w-02` | Worker 2 | 4 | 10 GB | 150 GB |
-| *Proxmox host* | Hypervisor | — | ~6 GB reserved | ~160 GB free |
+| `talos-cp-01` | Control Plane | 4 | 4 GB | 50 GB |
+| `talos-w-01` | Worker 1 | 4 | 8 GB | 150 GB |
+| `talos-w-02` | Worker 2 | 4 | 8 GB | 150 GB |
+| *Proxmox host* | Hypervisor | — | ~7 GiB reserved | ~418 GiB free |
 
-Total allocated: 26 GB RAM, ~350 GB disk. Proxmox host retains ~6 GB RAM buffer for OS and snapshots.
+Total allocated: 20 GB RAM from 27.13 GiB available — leaves ~7 GiB for Proxmox host OS and overhead. Disk: ~350 GB for VMs from ~418 GiB available after Proxmox root (~94 GiB).
+
+**Note:** Available RAM is 27.13 GiB (not 32 GB) because the AMD Radeon 780M iGPU reserves ~5 GB from system RAM. CP reduced to 4 GB (sufficient: etcd + control plane components use ~1.5 GB). Workers at 8 GB each support the full observability stack (~4–5 GB) with buffer.
 
 ### 3.2 VM Provisioning: Terraform
 
