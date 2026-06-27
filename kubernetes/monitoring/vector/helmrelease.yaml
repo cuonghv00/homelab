@@ -42,8 +42,8 @@ spec:
           encoding:
             codec: json
           labels:
-            cluster: "{{ cluster }}"
-            namespace: "{{ kubernetes.pod_namespace }}"
-            pod: "{{ kubernetes.pod_name }}"
-            container: "{{ kubernetes.container_name }}"
-            stream: "{{ stream }}"
+            cluster: '{{ "{{" }} cluster {{ "}}" }}'
+            namespace: '{{ "{{" }} kubernetes.pod_namespace {{ "}}" }}'
+            pod: '{{ "{{" }} kubernetes.pod_name {{ "}}" }}'
+            container: '{{ "{{" }} kubernetes.container_name {{ "}}" }}'
+            stream: '{{ "{{" }} stream {{ "}}" }}'
