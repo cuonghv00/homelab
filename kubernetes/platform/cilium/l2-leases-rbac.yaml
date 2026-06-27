@@ -1,0 +1,30 @@
+# L2 announcements use leader-election Leases (cilium-l2announce-*) in kube-system.
+# The cilium ClusterRole created by the Talos inline `cilium install` (run WITHOUT
+# l2announcements at the time) lacks Lease perms, so the agent logs
+# "cannot get resource leases ... forbidden" and never claims the LB IPs.
+# This additive Role grants it. (On a rebuild the Talos patch now installs Cilium
+# with l2announcements.enabled=true, which adds this RBAC via the chart; this Role
+# is then redundant but harmless.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cilium-l2announce-leases
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cilium-l2announce-leases
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: cilium
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: cilium-l2announce-leases
+  apiGroup: rbac.authorization.k8s.io
