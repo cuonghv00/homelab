@@ -30,6 +30,29 @@ spec:
         ruleSelectorNilUsesHelmValues: false
         serviceMonitorSelectorNilUsesHelmValues: false
         podMonitorSelectorNilUsesHelmValues: false
+        # local-path is hostPath-backed, which does NOT honor fsGroup, and the
+        # operator mounts the data dir via subPath (created root:root 0755 by
+        # kubelet). Prometheus runs as uid 1000 and cannot write it, so it
+        # crashes on /prometheus/queries.active. This root initContainer chowns
+        # the data dir before Prometheus starts. Allowed because the monitoring
+        # namespace is labeled pod-security privileged.
+        initContainers:
+          - name: init-chown-data
+            image: busybox:1.37
+            command: ["sh", "-c", "chown -R 1000:2000 /prometheus"]
+            securityContext:
+              runAsUser: 0
+              runAsNonRoot: false
+              allowPrivilegeEscalation: false
+              capabilities:
+                add: ["CHOWN"]
+                drop: ["ALL"]
+              seccompProfile:
+                type: RuntimeDefault
+            volumeMounts:
+              - name: prometheus-prometheus-prometheus-db
+                mountPath: /prometheus
+                subPath: prometheus-db
 
     grafana:
       defaultDashboardsTimezone: Asia/Ho_Chi_Minh
