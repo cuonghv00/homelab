@@ -239,7 +239,8 @@ resource "proxmox_virtual_environment_vm" "talos" {
   }
 
   cdrom {
-    file_id = proxmox_virtual_environment_download_file.talos_iso.id
+    interface = "ide3"   # pin so boot_order's "ide3" is always correct
+    file_id   = proxmox_virtual_environment_download_file.talos_iso.id
   }
 
   network_device {

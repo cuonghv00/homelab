@@ -51,7 +51,10 @@ resource "proxmox_virtual_environment_vm" "talos" {
   }
 
   cdrom {
-    file_id = proxmox_virtual_environment_download_file.talos_iso.id
+    # Pin the interface so boot_order's "ide3" stays correct regardless of
+    # provider default changes (confirmed: bpg places the cdrom on ide3).
+    interface = "ide3"
+    file_id   = proxmox_virtual_environment_download_file.talos_iso.id
   }
 
   network_device {
