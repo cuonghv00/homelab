@@ -23,3 +23,6 @@ spec:
     existingConfigMaps:
       - vector-config
     dataDir: /vector-data-dir
+    # Disable the Service since Vector Agent only pushes to Loki (no inbound)
+    service:
+      enabled: false
