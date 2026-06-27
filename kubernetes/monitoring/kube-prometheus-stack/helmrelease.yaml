@@ -103,10 +103,6 @@ spec:
           group_interval: 5m
           repeat_interval: 12h
           receiver: telegram
-          routes:
-            - receiver: telegram
-              matchers:
-                - alertname =~ ".*"
         receivers:
           - name: telegram
             telegram_configs:
