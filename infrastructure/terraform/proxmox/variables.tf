@@ -41,5 +41,6 @@ variable "talos_schematic_id" {
 
 variable "talos_version" {
   type        = string
+  description = "Talos Linux version to deploy (Image Factory tag, e.g. v1.13.5)"
   default     = "v1.13.5"
 }
