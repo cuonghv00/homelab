@@ -239,7 +239,7 @@ if exists(.payload) {
 | `merge(., x)` | Không | Merge regex result với error check riêng |
 | `merge!(., x)` | Có | Merge nested object, biết chắc schema |
 
-> **Pitfall:** `. |= x` và `merge(., x)` có hành vi khác nhau khi x có nested object: `|=` merge shallow (một level), trong khi `merge` cũng shallow. Không có built-in deep merge trong VRL.
+> **Pitfall:** `. |= x` và `merge(., x)` đều là **shallow merge** — không có deep-merge cho nested objects. Nếu `x` chứa `{a: {b: 1}}`, chỉ `.a` được copy (là object), không phải `.a.b`. Không có built-in deep merge trong VRL.
 
 ---
 
