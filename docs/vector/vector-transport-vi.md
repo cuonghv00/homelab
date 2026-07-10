@@ -305,21 +305,216 @@ Production: 4 configs disable (`haproxy_aggregator`, `vault_aggregator`, `vault_
 
 ---
 
-<!-- ============================================================ -->
-<!-- SECTIONS 3-5: Sẽ được bổ sung trong Task 6                  -->
-<!-- ============================================================ -->
+## 3. ClickHouse Sink
 
-<!-- ## 3. ClickHouse Sink -->
-<!-- TODO Task 6: ClickHouse sink config, skip_unknown_fields,    -->
-<!-- batch tuning, timestamp format (unix vs rfc3339),            -->
-<!-- concurrency adaptive, insert_random_shard                    -->
+```yaml
+sinks:
+  ch_output:
+    type: clickhouse
+    endpoint: "http://<ch-host>:8123"
+    auth:
+      strategy: basic
+      user: kong
+      password: "<redacted>"
+    batch:
+      max_events: 1000
+      max_bytes: 1048576    # 1MB
+      timeout_secs: 5
+    compression: gzip
+    database: kong
+    table: log_dist
+    skip_unknown_fields: true
+    request:
+      concurrency: adaptive
+```
 
-<!-- ## 4. Buffering & Back-pressure -->
-<!-- TODO Task 6: Vector buffer types (memory/disk), overflow     -->
-<!-- behavior, back-pressure from sinks, retry strategies         -->
+### `request.concurrency: adaptive`
 
-<!-- ## 5. End-to-End Latency Budget -->
-<!-- TODO Task 6: File→Kafka agent latency, Kafka→Aggregator,    -->
-<!-- Aggregator→ES/ClickHouse; total budget calculation;          -->
-<!-- monitoring với vector internal metrics                        -->
-<!-- ============================================================ -->
+**Verified from docs:** Vector's adaptive concurrency control (ACC) là thuật toán kiểm soát concurrency dựa trên đo lường latency. Nguyên lý:
+1. Bắt đầu với concurrency = 1
+2. Tăng dần, đo RTT (round-trip time) của mỗi request
+3. Nếu RTT tăng (backend đang quá tải), giảm concurrency
+4. Nếu RTT ổn định, thử tăng thêm
+
+**Khi nào dùng adaptive:**
+- ClickHouse load biến động (peak giờ cao điểm, off-peak thấp)
+- Không biết concurrency tối ưu cho cluster cụ thể
+- Muốn Vector tự tune mà không cần manual adjust
+
+**Khi nào dùng fixed:**
+- ClickHouse cluster dedicated, load stable
+- Muốn predictable resource usage
+
+### `skip_unknown_fields: true`
+
+ClickHouse có strict schema — insert field không có trong table definition sẽ fail. `skip_unknown_fields: true` bỏ qua các fields không có trong schema thay vì fail entire batch.
+
+> **Trade-off:** Có thể bỏ sót data nếu schema và event không sync. Nhưng tốt hơn là fail toàn bộ batch vì 1 field lạ. Nên monitor `component_errors_total` để phát hiện schema drift.
+
+### `decoding.codec: native` trên Kafka Source
+
+Khi destination là ClickHouse, dùng `native` codec trên Kafka consumer để giữ type information:
+
+```yaml
+sources:
+  kong_input:
+    type: kafka
+    bootstrap_servers: "<redacted>"
+    group_id: "kong-clickhouse"
+    decoding:
+      codec: native    # ← giữ Vector native type info
+    topics: ["vector-kong-log"]
+```
+
+Native codec giữ nguyên integer/float/boolean types thay vì convert tất cả sang string như JSON codec.
+
+### `to_unix_timestamp()` cho ClickHouse DateTime
+
+ClickHouse `DateTime` column cần Unix timestamp integer. Nếu dùng ISO8601 string sẽ fail insert.
+
+```vrl
+# Convert @timestamp sang Unix timestamp cho ClickHouse
+.timestamp = to_unix_timestamp(.@timestamp)             # seconds (Int64)
+.timestamp_ms = to_unix_timestamp(.@timestamp, unit: "milliseconds")  # ms (Int64)
+```
+
+**Verified from docs:** Signature của `to_unix_timestamp`: `to_unix_timestamp(timestamp, unit?)`. Tham số `unit` nhận các giá trị: `"seconds"` (default), `"milliseconds"`, `"microseconds"`, `"nanoseconds"`. Hàm trả về `integer` — phù hợp trực tiếp với ClickHouse `DateTime`, `DateTime64`, hoặc `Int64` columns.
+
+### Batch Config: ClickHouse vs Elasticsearch
+
+| Config | Elasticsearch | ClickHouse | Lý do khác |
+|---|---|---|---|
+| `max_bytes` | 5,000,000 (5MB) | 1,048,576 (1MB) | CH insert tốt nhất với batch nhỏ thường xuyên |
+| `max_events` | không set | 1,000 | CH optimize cho row count |
+| `timeout_secs` | 3 | 5 | CH cần thêm thời gian insert |
+| `concurrency` | 2 (fixed) | adaptive | CH load biến động hơn ES |
+
+> **Verified from docs:** ClickHouse INSERT tốt với nhiều batch nhỏ hơn là ít batch lớn. Khuyến nghị: 100–1,000 rows per insert là tối ưu; không nên vượt quá 10,000 rows hoặc 10MB per insert để tránh memory spike và CH reject.
+
+> **Pitfall / Trade-off:** `skip_unknown_fields: true` là safety net, không phải giải pháp lâu dài. Nếu log schema thay đổi thường xuyên, nên update ClickHouse table definition trước khi deploy — fields bị bỏ qua silently sẽ không xuất hiện trong CH và không có error nào được throw.
+
+---
+
+## 4. Compression Strategy
+
+Trong Agent→Kafka→Aggregator pipeline, compression được dùng ở 2 chỗ khác nhau với codec khác nhau:
+
+```
+[Agent] ──zstd──► [Kafka] ──(Kafka tự decompress)──► [Aggregator] ──gzip──► [ES/CH]
+```
+
+### Agent → Kafka: `zstd`
+
+```yaml
+sinks:
+  kafka_output:
+    type: kafka
+    compression: zstd
+```
+
+zstd được chọn vì:
+- **Tốc độ cao:** compress và decompress nhanh hơn gzip ~3-5x
+- **Ratio tốt:** tương đương hoặc tốt hơn gzip level 6
+- **CPU thấp:** agent thường chạy trên application server, không muốn tốn CPU
+
+### Aggregator → ES/ClickHouse: `gzip`
+
+```yaml
+sinks:
+  es_output:
+    type: elasticsearch
+    compression: gzip   # ES và CH đều hiểu gzip natively
+```
+
+gzip được chọn vì:
+- **Universal compatibility:** ES và ClickHouse HTTP API đều support gzip
+- **ES native decompression:** ES có thể index compressed data trực tiếp
+- **Giảm network bandwidth:** quan trọng khi aggregator → storage ở datacenter khác
+
+### Compression Trade-off Table
+
+| Codec | CPU (compress) | CPU (decompress) | Ratio | Latency | Dùng khi |
+|---|---|---|---|---|---|
+| `none` | 0 | 0 | 1x | Nhất | Dev/test, local network |
+| `lz4` | Rất thấp | Rất thấp | ~2x | Rất thấp | Throughput critical, CPU constrained |
+| `gzip` | Trung bình | Thấp | ~3-5x | Trung bình | Aggregator→ES/CH (recommended) |
+| `zstd` | Thấp | Rất thấp | ~4-8x | Thấp | Agent→Kafka (recommended) |
+| `zlib` | Cao | Trung bình | ~3-5x | Cao | Compatibility với legacy systems |
+
+> **Recommendation:** `zstd` cho agent→Kafka, `gzip` cho aggregator→storage. Không mix compression giữa Vector và non-Vector producers/consumers trừ khi cần thiết.
+
+> **Pitfall / Trade-off:** Kafka broker lưu và forward compressed batches nguyên vẹn — consumer tự decompress. Vì vậy, compression codec của Kafka producer (`zstd`) và codec của Vector ES/CH sink (`gzip`) là hoàn toàn độc lập. Đừng nhầm lẫn giữa Kafka wire compression và Vector sink HTTP compression.
+
+---
+
+## 5. Concurrency & Batching Trade-offs
+
+### Fixed vs Adaptive Concurrency
+
+```yaml
+# Fixed concurrency — predictable, safe default
+request:
+  concurrency: 2
+
+# Adaptive concurrency — self-tuning
+request:
+  concurrency: adaptive
+```
+
+**Khi nào dùng Fixed:**
+- ES cluster dedicated cho logging với capacity đã biết
+- Muốn giới hạn cứng số concurrent connections tới backend
+- Debug: khi adaptive gây ra oscillation (dao động liên tục)
+
+**Khi nào dùng Adaptive:**
+- ClickHouse với load biến động
+- Không biết optimal concurrency, muốn tự tune
+- Backend có auto-scaling (cloud services)
+
+**Tác động của concurrency:**
+
+| Concurrency | Throughput | Backend Load | Latency khi backpressure |
+|---|---|---|---|
+| 1 | Thấp nhất | Nhẹ | Thấp |
+| 2 | Tốt (balanced) | Trung bình | Trung bình |
+| 4-8 | Cao | Nặng | Cao nếu backend quá tải |
+| adaptive | Tự điều chỉnh | Tự điều chỉnh | Thấp (ACC kiểm soát) |
+
+### Batch Sizing: `max_bytes` vs `max_events` vs `timeout_secs`
+
+Batch flush khi ĐẠT BẤT KỲ điều kiện nào trong 3 fields:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Event đến → Buffer → Flush khi:                       │
+│                                                         │
+│  max_bytes đạt  ──OR──  max_events đạt  ──OR──  timeout │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Tác động của batch size lên ES:**
+
+| max_bytes | max_events | timeout | Hành vi |
+|---|---|---|---|
+| 5MB | — | 3s | Standard: flush khi đủ 5MB hoặc sau 3s |
+| 1MB | — | 1s | Low latency: data vào ES nhanh hơn, nhiều requests hơn |
+| 10MB | — | 10s | High throughput: ít requests, ES GC ít bị ảnh hưởng |
+
+**Tác động của batch size lên ClickHouse:**
+
+ClickHouse INSERT tốt khi batch đủ lớn để partition, nhưng quá lớn gây memory spike:
+- **Quá nhỏ (< 100 rows):** CH phải merge nhiều lần, write amplification cao
+- **Tốt nhất (100–10,000 rows):** CH insert hiệu quả, ít merge
+- **Quá lớn (> 100,000 rows):** Memory spike, CH có thể reject
+
+### Giá trị khuyến nghị từ Real Configs
+
+| Destination | max_bytes | max_events | timeout_secs | concurrency |
+|---|---|---|---|---|
+| Kafka (producer) | 1,000,000 | 800 | 5 | n/a |
+| Elasticsearch | 5,000,000 | — | 3 | 2 |
+| ClickHouse | 1,048,576 | 1,000 | 5 | adaptive |
+
+> **Trade-off cuối cùng:** Giảm `timeout_secs` → data xuất hiện trong ES/CH nhanh hơn nhưng nhiều API calls hơn. Tăng `max_bytes` → ít API calls hơn nhưng data delay lâu hơn khi volume thấp. Với log pipelines, 3–5 giây delay thường chấp nhận được.
+
+> **Pitfall / Trade-off:** `max_bytes` được tính trên uncompressed event size trước khi serialize. Khi dùng `compression: gzip`, actual HTTP payload gửi lên ES/CH nhỏ hơn nhiều so với `max_bytes`. Điều này không ảnh hưởng correctness, nhưng cần tính đến khi estimate network bandwidth — throughput thực tế trên wire thấp hơn `max_bytes × flush_rate`.
