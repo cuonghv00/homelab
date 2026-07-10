@@ -303,7 +303,7 @@ sinks:
 | `parse_syslog!(msg)` | Parse syslog format (RFC 3164/5424) |
 | `parse_json!(msg)` | Parse chuỗi JSON thành object |
 | `to_string(value)` | Chuyển giá trị bất kỳ sang chuỗi |
-| `to_int(value)` | Chuyển sang số nguyên |
+| `to_int!(value)` | Chuyển sang số nguyên (dấu `!` = abort nếu lỗi) |
 | `del(.field)` | Xóa field khỏi event |
 | `exists(.field)` | Kiểm tra field có tồn tại trong event không |
 | `downcase(string)` | Chuyển chuỗi sang chữ thường |
@@ -446,32 +446,23 @@ sinks:
 `aggregate` gom nhiều metric event trong một khoảng thời gian thành một metric event duy nhất. Transform này hoạt động trên **metric event** (counter, gauge, histogram) — không phải log event. Nó gom các metric có cùng tên và tags trong mỗi cửa sổ thời gian: counter được cộng lại, gauge giữ giá trị mới nhất, sau đó một event tổng hợp được emit ra cuối mỗi chu kỳ.
 
 ```yaml
-# vector.yaml — gom metric theo 60 giây: syslog → remap → aggregate → console
+# vector.yaml — gom metric theo 60 giây: internal_metrics → aggregate → console
 sources:
-  syslog_in:
-    type: syslog
-    mode: udp
-    address: "0.0.0.0:514"
+  internal:
+    type: internal_metrics   # nguồn metric nội bộ của Vector (counter, gauge, v.v.)
 
 transforms:
-  parse_syslog:
-    type: remap
-    inputs:
-      - syslog_in
-    source: |
-      . |= parse_syslog!(string!(.message))
-
-  count_per_minute:
+  gom_metric:
     type: aggregate
     inputs:
-      - parse_syslog
-    interval_ms: 60000   # gom metric trong 60 giây, sau đó emit 1 event tổng hợp
+      - internal
+    interval_ms: 60000        # gom metric trong 60 giây, sau đó emit 1 event tổng hợp
 
 sinks:
   out:
     type: console
     inputs:
-      - count_per_minute
+      - gom_metric
     encoding:
       codec: json
 ```
