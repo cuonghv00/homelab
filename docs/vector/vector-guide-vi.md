@@ -126,13 +126,127 @@ sinks:
 
 ## 4. Sources — Nơi dữ liệu vào
 
-> *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+Source là điểm bắt đầu của mọi pipeline — nơi Vector nhận dữ liệu đầu vào. Mỗi source có một `type` xác định cách Vector thu thập dữ liệu (đọc file, lắng nghe socket, nhận HTTP POST, v.v.) và một tên duy nhất do bạn tự đặt. Tên đó được các component phía sau dùng trong trường `inputs` để tham chiếu đến source này.
+
+Mỗi dòng dữ liệu đọc được từ source trở thành một **event** độc lập trong pipeline. Vector tự động thêm các field metadata như `message` (nội dung thô), `timestamp`, `host`, và `source_type` vào mỗi event. Bạn không cần khai báo `inputs` trong source — source luôn là điểm khởi đầu, không có upstream.
+
+Các source phổ biến nhất:
+
+| Type | Dùng khi |
+|---|---|
+| `file` | Đọc log từ file trên disk, theo dõi liên tục như `tail -f` |
+| `stdin` | Nhận dữ liệu từ standard input — hữu ích để test và piping |
+| `syslog` | Nhận log qua giao thức syslog (UDP/TCP/Unix socket) |
+| `http` | Nhận event qua HTTP POST từ ứng dụng hoặc webhook |
+| `kubernetes_logs` | Đọc log của tất cả container trên một node Kubernetes |
+
+**Ví dụ: đọc nginx access log từ file**
+
+```yaml
+# vector.yaml — đọc nginx access log và in ra console để xem event thô
+sources:
+  nginx_access:                         # tên tự đặt — dùng để tham chiếu sau
+    type: file
+    include:
+      - /var/log/nginx/access.log       # đường dẫn file cần theo dõi
+    read_from: beginning                # đọc từ đầu file khi khởi động lần đầu
+                                        # dùng "end" để chỉ đọc dòng mới từ bây giờ
+
+sinks:
+  debug_out:
+    type: console                       # in ra stdout để kiểm tra event thô
+    inputs:
+      - nginx_access                    # nhận event từ source "nginx_access"
+    encoding:
+      codec: json                       # mỗi event in ra một dòng JSON
+```
+
+**Ví dụ: nhận syslog qua UDP**
+
+```yaml
+# vector.yaml — nhận syslog qua UDP và in ra console
+sources:
+  syslog_input:                         # tên tự đặt
+    type: syslog
+    mode: udp                           # giao thức: "tcp", "udp", hoặc "unix"
+    address: "0.0.0.0:514"             # lắng nghe trên tất cả interface, cổng 514
+                                        # Vector tự parse RFC 3164/5424 và tạo các field:
+                                        # .appname, .severity, .facility, .hostname, ...
+
+sinks:
+  debug_out:
+    type: console
+    inputs:
+      - syslog_input                    # nhận event từ source "syslog_input"
+    encoding:
+      codec: json                       # in ra JSON để thấy các field syslog đã được parse
+```
+
+> **Ví dụ thực tế:** Một server nginx ghi log vào `/var/log/nginx/access.log`. Vector dùng source `file` để theo dõi file đó liên tục (giống `tail -f`) và tạo một event cho mỗi dòng mới. Event chứa dòng log thô trong field `.message` — các transform phía sau sẽ parse `.message` thành các field có cấu trúc như `.status`, `.path`, `.client`.
 
 ---
 
 ## 5. Sinks — Nơi dữ liệu ra
 
-> *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+Sink là điểm cuối của pipeline — nơi Vector gửi event đến đích lưu trữ hoặc xử lý. Khác với source, mỗi sink **bắt buộc phải khai báo `inputs`** để chỉ định nó nhận dữ liệu từ component nào (source hoặc transform). Một sink có thể nhận từ nhiều component cùng lúc bằng cách liệt kê nhiều tên trong danh sách `inputs`.
+
+Việc lựa chọn sink phù hợp phụ thuộc vào đích đến cuối cùng của dữ liệu. Trong giai đoạn viết và kiểm tra config, sink `console` là lựa chọn nhanh nhất để xem event trông như thế nào trước khi chuyển sang sink thật.
+
+Các sink phổ biến nhất:
+
+| Type | Dùng khi |
+|---|---|
+| `console` | In ra stdout — rất hữu ích để debug config và xem event thô |
+| `file` | Ghi event ra file trên disk, hỗ trợ path template theo ngày/giờ |
+| `http` | Gửi event qua HTTP POST đến bất kỳ endpoint nào |
+| `loki` | Gửi log vào Grafana Loki để lưu trữ và tìm kiếm |
+| `elasticsearch` | Gửi log vào Elasticsearch hoặc OpenSearch để index và phân tích |
+
+**Ví dụ: in ra console (debug)**
+
+```yaml
+# vector.yaml — file source → console sink (kiểm tra event)
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log       # file log cần đọc
+
+sinks:
+  debug_out:
+    type: console                       # xuất ra stdout — hữu ích khi debug
+    inputs:
+      - nginx_access                    # nhận event từ source "nginx_access"
+    target: stdout                      # "stdout" (mặc định) hoặc "stderr"
+    encoding:
+      codec: json                       # in ra dạng JSON, mỗi event một dòng
+```
+
+**Ví dụ: gửi vào Loki**
+
+```yaml
+# vector.yaml — file source → loki sink
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log       # đọc nginx access log
+
+sinks:
+  loki_out:
+    type: loki
+    inputs:
+      - nginx_access                    # nhận event từ source "nginx_access"
+    endpoint: "http://loki:3100"        # địa chỉ Loki server
+    labels:
+      app: nginx                        # label cố định — dùng để lọc log trong Grafana
+      env: production                   # label môi trường
+      # labels được Loki dùng để index và tra cứu; giữ số lượng label ít và có giá trị cố định
+    encoding:
+      codec: json                       # gửi mỗi event dưới dạng JSON đến Loki
+```
+
+> **Ví dụ thực tế:** Trong quá trình phát triển config, hãy dùng sink `console` trước để xem event trông như thế nào — kiểm tra xem các field đã đúng tên, đúng kiểu dữ liệu, và không còn field thừa. Khi kết quả đã ổn, chỉ cần đổi `type: console` thành `type: loki` (hoặc `type: elasticsearch`) và thêm các field cần thiết. Đây là cách debug nhanh nhất và tránh gửi dữ liệu sai vào hệ thống lưu trữ thật.
 
 ---
 
