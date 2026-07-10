@@ -223,7 +223,7 @@ parsed = parse_json!(.message)
 # Pattern B: merge() function — tương đương nhưng tường minh hơn
 parsed_log, err = parse_regex(.message, r'...')
 . = merge(., parsed_log)
-# merge() không abort khi fail — trả về Result type
+# merge() là infallible — luôn trả về object, không cần unwrap hay !
 
 # Pattern C: merge!() — abort ngay khi có type conflict
 if exists(.payload) {
@@ -300,6 +300,10 @@ Kong API gateway log chứa full URL kèm query string. Cần normalize trước
 ```vrl
 # Parse method và path từ request line: "GET /api/v1/users?id=123 HTTP/1.1"
 parsed_request, err = parse_regex(.request, r'(?sm)^[A-Z]+\s(?P<path>.*)?.*\s(?P<protocol>.*)$')
+if err != null {
+  log("Unable to parse request line: " + string!(.request), level: "warn")
+  abort
+}
 . = merge(., parsed_request)
 
 # Bỏ query string — chỉ giữ path chính: /api/v1/users
@@ -310,6 +314,8 @@ if contains(string!(.path), "?") {
 # Loại bỏ double slash: //api → /api
 .path = replace(string!(.path), "//", "/")
 ```
+
+Lưu ý: `parse_regex` trả về `null` khi fail — luôn kiểm tra `err != null` trước `merge` để tránh type error (`merge(., null)` sẽ fail vì merge yêu cầu object, không phải null).
 
 Các hàm string thường dùng:
 
@@ -339,8 +345,8 @@ Mỗi source có timestamp format khác nhau. Cần normalize về `@timestamp` 
 # MariaDB error log: YYYY-MM-DD HH:MM:SS
 .@timestamp = parse_timestamp(.time_log, format: "%Y-%m-%d %H:%M:%S") ?? now()
 
-# Reformat existing ISO8601 timestamp
-.@timestamp = format_timestamp(.@timestamp, format: "%+") ?? now()
+# Reformat existing timestamp → format_timestamp trả về string RFC 3339, không phải timestamp object
+.@timestamp = format_timestamp!(.@timestamp, format: "%+")
 
 # Vault/ePass: rename .time field sang .@timestamp
 if exists(.time) {
@@ -581,4 +587,4 @@ Key metrics để monitor:
 | `component_sent_events_total` | Output throughput | Lag so với received |
 | `buffer_events` | Số event đang buffer | Tăng liên tục (backpressure) |
 
-> **Pitfall:** `prometheus_exporter` giữ metrics trong memory. Nếu Vector restart, counter reset về 0. Dùng Prometheus `increase()` function thay vì `rate()` để tránh false alerts khi restart.
+> **Pitfall:** Grafana dashboard từ Grafana.com được build cho Vector của Grafana Labs — một số panel có thể dùng metric name khác với Vector open-source. Kiểm tra metric names bằng `curl http://localhost:21039/metrics | grep component` trước khi import dashboard.

@@ -345,6 +345,8 @@ sinks:
 - ClickHouse cluster dedicated, load stable
 - Muốn predictable resource usage
 
+> **Pitfall:** Adaptive concurrency bắt đầu với concurrency = 1 mỗi khi Vector restart — throughput sẽ thấp trong vài chục giây đầu khi ACC đang probe optimal concurrency. Nếu ClickHouse có latency SLA ngặt, dùng `concurrency: 2` (fixed) để tránh cold-start performance dip.
+
 ### `skip_unknown_fields: true`
 
 ClickHouse có strict schema — insert field không có trong table definition sẽ fail. `skip_unknown_fields: true` bỏ qua các fields không có trong schema thay vì fail entire batch.
@@ -368,6 +370,8 @@ sources:
 
 Native codec giữ nguyên integer/float/boolean types thay vì convert tất cả sang string như JSON codec.
 
+> **Pitfall:** `decoding.codec: native` chỉ hoạt động khi cả producer và consumer đều là Vector. Nếu một producer khác (logstash, filebeat) ghi vào cùng Kafka topic, native codec sẽ fail decode. Dùng `json` nếu topic có nhiều producer khác nhau.
+
 ### `to_unix_timestamp()` cho ClickHouse DateTime
 
 ClickHouse `DateTime` column cần Unix timestamp integer. Nếu dùng ISO8601 string sẽ fail insert.
@@ -379,6 +383,8 @@ ClickHouse `DateTime` column cần Unix timestamp integer. Nếu dùng ISO8601 s
 ```
 
 **Verified from docs:** Signature của `to_unix_timestamp`: `to_unix_timestamp(timestamp, unit?)`. Tham số `unit` nhận các giá trị: `"seconds"` (default), `"milliseconds"`, `"microseconds"`, `"nanoseconds"`. Hàm trả về `integer` — phù hợp trực tiếp với ClickHouse `DateTime`, `DateTime64`, hoặc `Int64` columns.
+
+> **Pitfall:** ClickHouse `DateTime` column cần `Int32` (seconds), `DateTime64(3)` cần `Int64` (milliseconds). Dùng sai unit sẽ gây insert fail hoặc data corruption (timestamp lệch 1000x). Kiểm tra column type trong ClickHouse trước khi deploy.
 
 ### Batch Config: ClickHouse vs Elasticsearch
 
@@ -417,6 +423,8 @@ zstd được chọn vì:
 - **Ratio tốt:** tương đương hoặc tốt hơn gzip level 6
 - **CPU thấp:** agent thường chạy trên application server, không muốn tốn CPU
 
+> **Pitfall:** Nếu Kafka broker version cũ (< 2.1), `zstd` compression không được hỗ trợ. Kiểm tra broker version trước khi dùng `zstd` — dùng `lz4` hoặc `gzip` nếu broker cũ hơn 2.1.
+
 ### Aggregator → ES/ClickHouse: `gzip`
 
 ```yaml
@@ -430,6 +438,8 @@ gzip được chọn vì:
 - **Universal compatibility:** ES và ClickHouse HTTP API đều support gzip
 - **ES native decompression:** ES có thể index compressed data trực tiếp
 - **Giảm network bandwidth:** quan trọng khi aggregator → storage ở datacenter khác
+
+> **Trade-off:** `gzip` tăng CPU ~10-30% trên aggregator (tùy throughput). Nếu aggregator và storage trong cùng datacenter (low-latency, high-bandwidth internal network), cân nhắc `none` để giảm CPU overhead — network không phải bottleneck trong trường hợp này.
 
 ### Compression Trade-off Table
 
@@ -480,6 +490,8 @@ request:
 | 4-8 | Cao | Nặng | Cao nếu backend quá tải |
 | adaptive | Tự điều chỉnh | Tự điều chỉnh | Thấp (ACC kiểm soát) |
 
+> **Pitfall:** Khi adaptive concurrency bị "stuck" ở concurrency = 1 (thường xảy ra khi backend latency cao ngay từ cold start), tăng `request.timeout_secs` để cho phép ACC thu thập đủ sample trước khi quyết định tăng concurrency. Nếu vẫn không tăng, switch sang fixed concurrency để debug bottleneck.
+
 ### Batch Sizing: `max_bytes` vs `max_events` vs `timeout_secs`
 
 Batch flush khi ĐẠT BẤT KỲ điều kiện nào trong 3 fields:
@@ -506,6 +518,8 @@ ClickHouse INSERT tốt khi batch đủ lớn để partition, nhưng quá lớn
 - **Quá nhỏ (< 100 rows):** CH phải merge nhiều lần, write amplification cao
 - **Tốt nhất (100–10,000 rows):** CH insert hiệu quả, ít merge
 - **Quá lớn (> 100,000 rows):** Memory spike, CH có thể reject
+
+> **Pitfall:** `timeout_secs` cần đủ lớn để batch tích lũy trong off-peak hours. Nếu set quá thấp (1–2s), Vector liên tục flush batch nhỏ — với ClickHouse, nhiều INSERT nhỏ dưới 100 rows tăng merge overhead đáng kể và có thể trigger "too many parts" error.
 
 ### Giá trị khuyến nghị từ Real Configs
 
