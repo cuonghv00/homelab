@@ -128,3 +128,50 @@ sinks:
 - **`sample` before `route`**: sampling before routing can discard high-priority events (errors). Always `route` first to isolate important streams, then apply `sample` only to low-priority output.
 - **`dedupe` only catches nearby duplicates**: the LRU cache has a bounded size (default 5000 events). Two identical events separated by more than 5000 other events will both be passed through. State is also lost on Vector restart.
 - **`aggregate` only works on metric events**: passing log events through `aggregate` has no effect. For merging multiple log lines into one, use `reduce` instead.
+
+## Advanced Production Patterns
+
+Architecture: `Agent (file/syslog/socket) → Kafka (zstd) → Aggregator → ES/ClickHouse (gzip)`
+
+| Pattern | When | Key config |
+|---|---|---|
+| Custom regex parse | Non-standard log format | `parse_regex(.message, r'(?P<field>...)')` → `merge(., parsed)` |
+| Two-step parse | Timestamp prefix + JSON body | `parse_regex` for timestamp → `parse_json!(.message)` |
+| Multiline assembly | Multi-line logs (slow query, stack trace, InnoDB) | `file.multiline.start_pattern` + `mode: halt_before` |
+| Payload unwrap | `{payload: {...}}` nested JSON | `if exists(.payload) { . = merge!(., .payload); del(.payload) }` |
+| Pre-parse filter | Abort noisy events before expensive parse | `if contains(string!(.message), "PROMEX") { abort }` |
+| Fan-in | Multiple sources → one transform | `inputs: [src1, src2]` in transform |
+| Timestamp normalize | Standardize @timestamp | `parse_timestamp(.field, format: "...") ?? now()` |
+| ClickHouse timestamp | CH needs Unix integer | `to_unix_timestamp(.@timestamp)` |
+
+## VRL Error Handling Tiers
+
+| Tier | Syntax | When |
+|---|---|---|
+| Abort (strictest) | `parse_json!(.message)` | Field required, parse fail = useless event |
+| Fallback | `to_float(.x) ?? 0` | Optional field, has sensible default |
+| Explicit check | `x, err = f(.x); if err != null { log(err); abort }` | Want to log before dropping |
+
+## Transport Quick Reference
+
+| Sink | `bulk.action` | Compression | Concurrency | Batch |
+|---|---|---|---|---|
+| Kafka (producer) | n/a | `zstd` | n/a | 1MB / 800 events / 5s |
+| Elasticsearch | `create` | `gzip` | `2` (fixed) | 5MB / 3s |
+| ClickHouse | n/a | `gzip` | `adaptive` | 1MB / 1000 events / 5s |
+
+## File Source Fingerprint Strategy
+
+| Strategy | Use when | Risk |
+|---|---|---|
+| `checksum` (lines: 20) | Log rotation with new file (copytruncate) | Header changes → re-read |
+| `device_and_inode` | Stable file or rename-based rotation | Filesystem change → re-read |
+
+## Kafka Metadata Cleanup
+
+Always delete Kafka metadata after source:
+
+```vrl
+del(.source_type); del(.topic); del(.partition); del(.offset)
+del(.message_key); del(.headers); del(.metadata); del(.message)
+```
