@@ -1,0 +1,317 @@
+# Vector — Transport & Sink Optimization
+
+> Hướng dẫn tối ưu cấu hình Kafka, Elasticsearch, và ClickHouse sink trong môi trường production.
+> Mỗi tham số được verify từ tài liệu chính thức của Vector và đánh giá trade-off thực tế.
+
+---
+
+## 0. Aggregator Pattern
+
+Aggregator đọc từ Kafka, transform nhẹ (cleanup metadata), rồi ghi vào storage backend.
+
+```yaml
+sources:
+  log_input:
+    type: kafka
+    bootstrap_servers: "<broker1>:9092,<broker2>:9092,<broker3>:9092"
+    group_id: "vector_nginx"
+    topics:
+      - "vector-log-nginx-access"
+
+transforms:
+  cleanup:
+    type: remap
+    inputs: [log_input]
+    timezone: Asia/Ho_Chi_Minh
+    drop_on_error: true
+    source: |
+      # Parse JSON từ Kafka message
+      parsed = parse_json!(.message)
+      . |= object(parsed) ?? {}
+
+      # Cleanup Kafka metadata fields — luôn có khi source là kafka
+      del(.source_type)
+      del(.topic)
+      del(.partition)
+      del(.offset)
+      del(.message_key)
+      del(.headers)
+      del(.metadata)
+      del(.message)
+
+sinks:
+  es_output:
+    type: elasticsearch
+    inputs: [cleanup]
+    # ... (xem Section 2)
+```
+
+**Standard Kafka metadata fields cần cleanup:**
+
+| Field | Nguồn | Mô tả |
+|---|---|---|
+| `.source_type` | Vector internal | Luôn là `"kafka"` — không cần |
+| `.topic` | Kafka | Tên topic |
+| `.partition` | Kafka | Partition number |
+| `.offset` | Kafka | Offset trong partition |
+| `.message_key` | Kafka | Message key (nếu có) |
+| `.headers` | Kafka | Kafka headers map |
+| `.metadata` | Kafka | Kafka metadata |
+| `.message` | Kafka | Raw message bytes (sau khi parse) |
+
+> **Pitfall:** Nếu không `del(.message)` sau khi parse JSON, raw bytes sẽ được ghi vào Elasticsearch cùng với tất cả các fields đã parse — tăng storage không cần thiết và có thể gây nhầm lẫn khi query.
+
+---
+
+## 1. Kafka Configuration
+
+### 1.1 Producer (Agent Side)
+
+```yaml
+sinks:
+  kafka_output:
+    type: kafka
+    bootstrap_servers: "<broker1>:9092,<broker2>:9092"
+    topic: vector-log-nginx-access
+    batch:
+      max_bytes: 1000000    # 1MB per batch
+      max_events: 800       # tối đa 800 events per batch
+      timeout_secs: 5       # flush sau 5 giây dù chưa đủ max_bytes/max_events
+    compression: zstd
+    encoding:
+      codec: json
+```
+
+**`batch` fields — Kafka producer:**
+
+Batch được flush khi ĐẠT BẤT KỲ điều kiện nào:
+
+| Field | Giá trị thực tế | Default | Ý nghĩa |
+|---|---|---|---|
+| `max_bytes` | 1,000,000 (1MB) | không có (optional) | Tổng kích thước batch |
+| `max_events` | 800 | không có (optional) | Số events tối đa |
+| `timeout_secs` | 5 | 1 | Flush dù chưa đủ max |
+
+> **Verified from docs (Kafka sink):** `batch.max_bytes` và `batch.max_events` đều là optional fields không có documented default — nếu không set, sink chỉ flush theo `timeout_secs` (default 1 giây). `encoding.codec` là **required** field, không có default. Các configs trong production (nginx_agent, epass_audit) đều đặt `max_bytes: 1,000,000` và `max_events: 800` để kiểm soát batch size rõ ràng thay vì phụ thuộc vào timeout.
+
+**`compression: zstd` vs alternatives:**
+
+| Codec | Ratio | CPU | Tốc độ | Dùng khi |
+|---|---|---|---|---|
+| `zstd` | ~4-8x | Thấp | Nhanh nhất | Production agent→Kafka (khuyến nghị) |
+| `gzip` | ~3-5x | Trung bình | Trung bình | Compatibility (ES/CH native) |
+| `lz4` | ~2-3x | Rất thấp | Nhanh | Throughput > latency, storage rẻ |
+| `snappy` | ~2-3x | Rất thấp | Rất nhanh | Throughput cực cao, latency nhạy cảm |
+| `none` | 1x | Không | Nhất | Local testing, very low volume |
+
+> **Recommendation:** Dùng `zstd` cho Kafka producer. Kafka broker tự động decompress và không forward compression sang consumers — consumer sẽ nhận data không nén từ broker (broker decompresses và re-serves theo cấu hình của consumer fetch). Tất cả 10+ Kafka producers trong production configs đều dùng `compression: zstd`.
+
+### 1.2 Consumer (Aggregator Side)
+
+```yaml
+sources:
+  log_input:
+    type: kafka
+    bootstrap_servers: "<broker1>:9092,<broker2>:9092"
+    group_id: "vector_nginx_aggregator"  # Unique per consumer group
+    topics:
+      - "vector-log-nginx-access"
+    decoding:
+      codec: json   # hoặc "native" cho ClickHouse destination
+```
+
+**`group_id` strategy:**
+
+- Mỗi aggregator deployment dùng một `group_id` riêng
+- Multiple instances của cùng aggregator SHARE `group_id` (Kafka tự partition)
+- Muốn replay từ đầu: đổi `group_id` mới (Kafka consumer group không có history)
+
+**Group ID naming patterns quan sát được trong production:**
+
+| Pattern | Ví dụ | Dùng khi |
+|---|---|---|
+| Service-based | `vector_nginx`, `vector_kong_aggregator` | Single service, rõ ràng |
+| Log-type-based | `mariadb_slow_monitor`, `mariadb_error_monitor` | Nhiều log type từ 1 service |
+| Env-suffixed | `vault_log_prod_2`, `vault_log_uat` | Multi-env cùng Kafka cluster |
+
+> **Verified from docs (Kafka source):** `group_id` là required field. Kafka distributes partitions among consumers in the same group — each partition consumed by exactly one consumer instance at a time. Field names added by Kafka source (`.topic`, `.partition`, `.offset`, `.message_key`, `.headers`) đều có thể override qua `*_key` parameters nếu cần.
+
+**`decoding.codec`:**
+
+| Codec | Default | Dùng khi |
+|---|---|---|
+| `bytes` | Có (default) | Forward raw bytes, không parse |
+| `json` | Không | Destination là Elasticsearch (phổ biến nhất) |
+| `native` | Không | Destination là ClickHouse (giữ type info tốt hơn — Vector binary protobuf format) |
+
+> **Pitfall:** Kafka broker không biết về compression của producers. Nếu producer dùng `zstd` và consumer config `decoding.codec: native`, data vẫn được decompress đúng — `decoding.codec` ở đây là về Vector event format (cách Vector serialize event trước khi đưa vào Kafka), không phải Kafka wire compression. `decoding.codec: native` chỉ hoạt động khi producer cũng dùng `encoding.codec: native` (Vector-to-Vector pipeline).
+
+---
+
+## 2. Elasticsearch Sink
+
+```yaml
+sinks:
+  es_output:
+    type: elasticsearch
+    endpoints:
+      - "https://<es-host>:9200"
+    bulk:
+      action: create
+      index: nginx-access-stream
+    compression: gzip
+    api_version: v8
+    batch:
+      max_bytes: 5000000    # 5MB
+      timeout_secs: 3
+    request:
+      timeout_secs: 30
+      concurrency: 2
+    auth:
+      strategy: basic
+      user: vector-dev
+      password: "<redacted>"
+    healthcheck:
+      enabled: false
+```
+
+> **Nhận xét pattern:** Config trên là "standard pattern" của 12+ aggregators trong production. Outlier duy nhất: `cdcn_aggregator` dùng `timeout_secs: 10`, `concurrency: adaptive`, `request.timeout_secs: 120` — phù hợp với pipeline có ES load biến động cao.
+
+### `bulk.action`: `create` vs `index`
+
+**Verified from docs (ES Bulk API):**
+
+| Action | Hành vi | HTTP khi _id trùng |
+|---|---|---|
+| `index` | Upsert — tạo mới hoặc overwrite nếu `_id` đã tồn tại | 200 OK (overwrite) |
+| `create` | Tạo document mới. Fail nếu `_id` đã tồn tại | 409 Conflict |
+| `update` | Partial update document đã tồn tại | — |
+
+- **Default của Vector:** `index`
+- **Production configs:** Tất cả đều dùng `create` (không có config nào dùng `index`)
+
+**Recommendation cho log pipeline:** Luôn dùng `create`.
+
+- Log events không có natural `_id` → Vector tự gen random ID → không bao giờ conflict
+- Bảo vệ khỏi duplicate indexing khi aggregator bị restart và Kafka offset chưa commit
+- Đặc biệt bắt buộc khi dùng **Elasticsearch Data Streams** — Data Streams là append-only, chỉ chấp nhận `create`
+
+> **Trade-off:** Nếu bạn muốn idempotent reprocessing (chạy lại aggregator từ Kafka offset cũ mà không tạo duplicate), cần dùng `index` với deterministic `_id` (ví dụ: hash của event content). Điều này phức tạp hơn và thường không cần thiết cho log pipelines — log events được designed để là immutable, append-only records.
+
+### `api_version: v8`
+
+**Verified from docs:**
+
+| Version | Dùng khi | Đặc điểm |
+|---|---|---|
+| `auto` | Default — tự detect từ endpoint | Assume `v8` nếu endpoint unreachable |
+| `v6` | Elasticsearch 6.x | Legacy type mapping |
+| `v7` | Elasticsearch 7.x | Type mapping vẫn có nhưng deprecated |
+| `v8` | Elasticsearch 8.x | Không có type mapping trong bulk requests |
+
+ES 8.x bỏ hoàn toàn type mapping — `api_version: v8` disable `_type` field trong bulk requests. Nếu dùng ES 7.x thì dùng `v7`. **Amazon OpenSearch Serverless yêu cầu set `api_version` explicitly** (không dùng `auto`).
+
+Production configs: mix giữa `v8` (nginx, napas, kong, cdcn, uat_kpp, transaction, app4) và `auto` (haproxy, vault, epass, mariadb, mskpp) tùy thuộc vào ES cluster version.
+
+### `compression: gzip`
+
+**Verified from docs (ES sink compression):**
+
+- **Default:** `none` (không nén)
+- **Valid values:** `none`, `gzip`, `snappy`, `zlib`, `zstd`
+- Tất cả algorithms dùng default compression level
+
+Production pattern: hầu hết dùng `gzip` — được ES native support và không cần decompress riêng. Một số configs dùng `none` (haproxy, vault prod) — có thể do bandwidth không phải bottleneck hoặc ES cluster ở cùng network.
+
+### `batch` — ES producer side
+
+| Field | Giá trị thực tế | Default (docs) | Ý nghĩa |
+|---|---|---|---|
+| `max_bytes` | 5,000,000 (5MB) | 10,000,000 (10MB) | Tổng payload per bulk request (uncompressed) |
+| `timeout_secs` | 3 | 1 | Flush sau N giây |
+
+> **Verified from docs:** `batch.max_bytes` default là 10MB (`10000000`), tính theo uncompressed event size trước khi serialize. `batch.timeout_secs` default là 1 giây.
+>
+> Production configs dùng **5MB** (thay vì default 10MB) và **3 giây** (thay vì default 1 giây) — đây là "balanced default" cho throughput vs latency vs ES cluster load.
+>
+> ES khuyến nghị bulk request size 5–15MB. Nhỏ hơn = nhiều HTTP requests hơn = overhead cao. Lớn hơn = ES phải buffer nhiều hơn, tăng GC pressure trên JVM heap.
+
+### `request.concurrency`
+
+**Verified from docs:**
+
+| Value | Hành vi |
+|---|---|
+| `"adaptive"` (default) | Vector ARC — tự động optimize theo p90 latency của downstream ES |
+| positive integer (vd. `2`) | Fixed — tối đa N concurrent bulk requests |
+| `"none"` | Fixed concurrency = 1 |
+
+**Cơ chế ARC (Adaptive Request Concurrency):** Bắt đầu với 1 concurrent request. Nếu latency tốt → tăng. Nếu latency tăng → giảm. Cơ chế tương tự TCP congestion control (AIMD). Tránh overwhelm ES khi hot.
+
+| Scenario | Dùng | Lý do |
+|---|---|---|
+| ES cluster ổn định, load predictable | `concurrency: 2` | Predictable, dễ debug, không oscillate |
+| ES load biến động cao | `concurrency: adaptive` | Auto-tune theo backpressure |
+| High-throughput, ES có nhiều resources | `concurrency: 4-8` | Tăng throughput |
+
+**Production observation:** 12+ aggregators dùng `concurrency: 2`. Chỉ `cdcn_aggregator` và `clickhouse_ag` dùng `adaptive` — cả hai đều có ES/ClickHouse load biến động.
+
+> **Recommendation:** Với ES cluster dedicated cho logging, `concurrency: 2` là điểm bắt đầu tốt. Tăng lên 4–8 nếu ES có đủ resources và throughput cần thiết. Dùng `adaptive` nếu ES có variable load patterns.
+
+### `request.timeout_secs: 30`
+
+**Verified from docs:** Default là **60 giây**. Production configs dùng **30 giây**.
+
+Timeout cho HTTP request tới ES. Nếu ES cluster bận và response chậm hơn N giây, Vector retry sau timeout. Với bulk indexing bình thường, 30 giây là đủ. Outlier: `cdcn_aggregator` dùng `timeout_secs: 120` — ES cluster đó có response time cao hơn bình thường do data volume lớn.
+
+> **Pitfall:** Đừng set timeout quá thấp (< 10 giây) cho bulk request. ES cần time để process large batches. Timeout quá thấp sẽ gây retry storm — nhiều request fail → Vector retry → ES càng bận hơn → vòng lặp.
+
+### `healthcheck.enabled: false`
+
+**Verified from docs:** Default là `true`. Khi enabled, Vector verify ES accessible khi sink initialize. On failure: log error nhưng Vector vẫn start (soft failure). Để force exit on failure, dùng `--require-healthy` CLI flag.
+
+**Khi nào disable:**
+
+| Scenario | Lý do disable |
+|---|---|
+| ES chưa available khi Vector start | Docker Compose race condition — Vector start trước ES |
+| ES healthcheck endpoint cần auth riêng | Healthcheck HTTP GET không send auth header giống bulk request |
+| Testing / short-lived pipelines | Không cần wait for healthcheck |
+
+Production: 4 configs disable (`haproxy_aggregator`, `vault_aggregator`, `vault_uat_aggregator`, `transaction`). Tất cả đều là môi trường production nơi ES và Vector có thể restart independently.
+
+> **Trade-off:** Disable healthcheck → Vector không biết ES unreachable cho đến khi send request thật → delay error detection vài giây đến vài chục giây (tuỳ `batch.timeout_secs`). Nếu ES stable, không vấn đề. Nếu cần early warning, giữ `enabled: true` và monitor Vector logs.
+
+### Trade-off: Throughput vs Latency vs ES Cluster Load
+
+| Config | Throughput | Indexing Latency | ES Load |
+|---|---|---|---|
+| batch 5MB, timeout 3s, concurrency 2 | Cao | Trung bình (≤3s) | Trung bình (**production default**) |
+| batch 1MB, timeout 1s, concurrency 4 | Cao | Thấp (≤1s) | Cao hơn |
+| batch 10MB, timeout 10s, concurrency 1 | Cao | Cao (≤10s) | Thấp nhất |
+| batch 5MB, timeout 10s, concurrency adaptive | Biến động | Biến động | Tự điều chỉnh |
+
+**Cho log pipeline thông thường:** batch 5MB + timeout 3s + concurrency 2 là balanced default — được verify qua 12+ production configs.
+
+**Cho pipeline volume lớn với ES có nhiều resources:** Tăng concurrency lên 4-8 trước, batch size sau.
+
+---
+
+<!-- ============================================================ -->
+<!-- SECTIONS 3-5: Sẽ được bổ sung trong Task 6                  -->
+<!-- ============================================================ -->
+
+<!-- ## 3. ClickHouse Sink -->
+<!-- TODO Task 6: ClickHouse sink config, skip_unknown_fields,    -->
+<!-- batch tuning, timestamp format (unix vs rfc3339),            -->
+<!-- concurrency adaptive, insert_random_shard                    -->
+
+<!-- ## 4. Buffering & Back-pressure -->
+<!-- TODO Task 6: Vector buffer types (memory/disk), overflow     -->
+<!-- behavior, back-pressure from sinks, retry strategies         -->
+
+<!-- ## 5. End-to-End Latency Budget -->
+<!-- TODO Task 6: File→Kafka agent latency, Kafka→Aggregator,    -->
+<!-- Aggregator→ES/ClickHouse; total budget calculation;          -->
+<!-- monitoring với vector internal metrics                        -->
+<!-- ============================================================ -->
