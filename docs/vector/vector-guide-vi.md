@@ -120,7 +120,7 @@ sinks:
       codec: json                     # in dạng JSON để thấy rõ các field
 ```
 
-> **Ví dụ thực tế:** Sau khi parse nginx log, event sẽ có thêm các field: `.client` (địa chỉ IP), `.request` (method + path), `.status` (mã HTTP dạng chuỗi). Bạn có thể dùng thêm một transform `filter` để chỉ giữ lại các event có `.status >= "400"` — tức là chỉ lấy các request lỗi.
+> **Ví dụ thực tế:** Sau khi parse nginx log, event sẽ có thêm các field: `.client` (địa chỉ IP), `.request` (dòng request thô, ví dụ: "GET /api/health HTTP/1.1"), `.status` (mã HTTP dạng số nguyên). Bạn có thể dùng thêm một transform `filter` để chỉ giữ lại các event có `.status >= 400` — tức là chỉ lấy các request lỗi.
 
 ---
 
@@ -151,3 +151,5 @@ sinks:
 ## 8. Bảng quyết định: Chọn transform nào?
 
 > *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+
+---
