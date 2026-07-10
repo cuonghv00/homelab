@@ -252,7 +252,323 @@ sinks:
 
 ## 6. Transforms — Biến đổi dữ liệu
 
-> *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+Transform là bước xử lý nằm giữa source và sink. Mỗi transform nhận event từ `inputs`, xử lý — parse, lọc, tách luồng, hoặc gom nhóm — rồi truyền event đã thay đổi cho component tiếp theo. Trong một pipeline, bạn có thể có không, một, hoặc nhiều transform kết nối nối tiếp hoặc song song — các transform sau tham chiếu các transform trước qua trường `inputs`, giống như cách transform tham chiếu source.
+
+Một số transform như `remap` và `filter` là stateless: mỗi event được xử lý độc lập, không giữ trạng thái giữa các event. Một số transform khác như `dedupe` và `reduce` là stateful: chúng duy trì bộ nhớ tạm giữa các event. Biết sự khác biệt này giúp bạn thiết kế pipeline đúng và tránh các hành vi không mong muốn khi Vector restart.
+
+### 6.1 remap — Biến đổi field với VRL
+
+`remap` là transform quan trọng nhất và được dùng nhiều nhất trong Vector. Nó dùng **VRL (Vector Remap Language)** — một ngôn ngữ scripting nhỏ gọn, được biên dịch sang Rust — để đọc, sửa, thêm, xóa field trong mỗi event.
+
+VRL dùng ký hiệu dấu chấm để truy cập field: `.message`, `.status`, `.timestamp`. Toàn bộ event được biểu diễn bởi dấu chấm `.` — khi bạn viết `. = something` nghĩa là bạn đang thay thế toàn bộ event bằng giá trị mới. Hàm có hậu tố `!` (bang operator) sẽ abort — bỏ event hiện tại — nếu hàm đó gặp lỗi. Ngược lại, nếu không dùng `!`, lỗi sẽ bị bỏ qua âm thầm và event có thể chứa dữ liệu sai. Đây là cơ chế bảo vệ: thà bỏ một event hỏng còn hơn để dữ liệu sai lan vào pipeline.
+
+```yaml
+# vector.yaml — parse nginx log: file → remap → console
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access              # nhận event thô từ source "nginx_access"
+    source: |
+      # parse_nginx_log! tách .message thành các field có cấu trúc
+      # dấu ! nghĩa là: nếu parse thất bại, bỏ event này đi
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+      # thêm field mới từ giá trị hiện có
+      .is_error = .status >= 400
+
+      # xóa field không cần thiết
+      del(.source_type)
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - parse_nginx               # nhận event đã xử lý từ transform
+    encoding:
+      codec: json
+```
+
+**Các hàm VRL thường dùng:**
+
+| Hàm | Mô tả |
+|---|---|
+| `parse_nginx_log!(msg, format: "combined")` | Parse nginx access log thành các field rời rạc |
+| `parse_syslog!(msg)` | Parse syslog format (RFC 3164/5424) |
+| `parse_json!(msg)` | Parse chuỗi JSON thành object |
+| `to_string(value)` | Chuyển giá trị bất kỳ sang chuỗi |
+| `to_int(value)` | Chuyển sang số nguyên |
+| `del(.field)` | Xóa field khỏi event |
+| `exists(.field)` | Kiểm tra field có tồn tại trong event không |
+| `downcase(string)` | Chuyển chuỗi sang chữ thường |
+
+> **Ví dụ thực tế:** Log nginx thô là một dòng text khó tìm kiếm và lọc. Sau `remap` với `parse_nginx_log!`, event có các field riêng biệt: `.client` (địa chỉ IP), `.request` (dòng request), `.status` (mã HTTP), `.size` (kích thước response) — bạn có thể filter, group, hoặc cảnh báo dựa trên từng field thay vì phải dùng regex trên chuỗi thô.
+
+---
+
+### 6.2 filter — Lọc event
+
+`filter` giữ lại event thỏa điều kiện và **bỏ hoàn toàn** (drop permanently) các event không thỏa. Điều kiện viết bằng VRL expression trả về boolean.
+
+> **Lưu ý quan trọng:** Event bị filter bỏ sẽ biến mất hoàn toàn khỏi pipeline — không có cách nào lấy lại, không có output `.dropped`. Nếu bạn muốn gửi event không thỏa điều kiện sang sink khác thay vì xóa chúng, hãy dùng `route` (xem mục 6.3).
+
+```yaml
+# vector.yaml — chỉ giữ lại request lỗi: file → remap → filter → console
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access
+    source: |
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  only_errors:
+    type: filter
+    inputs:
+      - parse_nginx               # nhận event từ transform "parse_nginx"
+    condition: '.status >= 400'   # chỉ giữ event có HTTP status >= 400
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - only_errors
+    encoding:
+      codec: json
+```
+
+Điều kiện phức tạp hơn — loại bỏ healthcheck request:
+
+```yaml
+# vector.yaml — bỏ healthcheck request: file → remap → filter → console
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access
+    source: |
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  exclude_healthcheck:
+    type: filter
+    inputs:
+      - parse_nginx
+    condition: '.request != "GET /health HTTP/1.1"'   # bỏ healthcheck requests
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - exclude_healthcheck
+    encoding:
+      codec: json
+```
+
+> **Ví dụ thực tế:** Bạn có hàng nghìn request mỗi giây nhưng chỉ muốn alert khi có lỗi. Dùng `filter` với điều kiện `.status >= 500` trước sink tới alerting system — các request thành công bị loại bỏ ngay tại đây, không tiêu tốn băng thông hay chi phí lưu trữ.
+
+---
+
+### 6.3 route — Phân luồng event
+
+`route` tách một luồng event thành nhiều luồng dựa trên điều kiện. Khác với `filter` xóa event không thỏa, `route` **gửi event đến output khác nhau** — mỗi route có tên riêng và trở thành một output độc lập mà các component phía sau có thể dùng làm input.
+
+Để tham chiếu output của route trong `inputs` của sink hoặc transform khác, dùng cú pháp `tên_transform.tên_route`. Event không khớp với bất kỳ route nào sẽ vào output đặc biệt `_unmatched` — bạn có thể dùng `tên_transform._unmatched` trong `inputs` để bắt các event này thay vì để chúng bị mất.
+
+```yaml
+# vector.yaml — phân luồng theo status: file → remap → route → nhiều sink
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access
+    source: |
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  split_by_status:
+    type: route
+    inputs:
+      - parse_nginx               # nhận event từ transform "parse_nginx"
+    route:
+      errors:   '.status >= 500'                    # output "errors"
+      warnings: '.status >= 400 && .status < 500'   # output "warnings"
+      ok:       '.status < 400'                     # output "ok"
+
+sinks:
+  out_errors:
+    type: console
+    inputs:
+      - split_by_status.errors    # cú pháp: tên_transform.tên_route
+    target: stderr                # lỗi 5xx ra stderr
+    encoding:
+      codec: json
+
+  out_all:
+    type: console
+    inputs:
+      - split_by_status.warnings
+      - split_by_status.ok
+      - split_by_status._unmatched  # bắt event không khớp route nào
+    target: stdout
+    encoding:
+      codec: json
+```
+
+> **Ví dụ thực tế:** Gửi lỗi 5xx vào hệ thống alert, ghi tất cả request vào Loki để lưu trữ dài hạn — dùng `route` để chia luồng mà không cần đọc source hai lần. Đây là điểm khác biệt chính so với `filter`: `filter` xóa event không thỏa điều kiện, còn `route` chuyển hướng chúng sang đích khác để xử lý tiếp.
+
+---
+
+### 6.4 aggregate — Gom nhóm metric theo thời gian
+
+`aggregate` gom nhiều metric event trong một khoảng thời gian thành một metric event duy nhất. Transform này hoạt động trên **metric event** (counter, gauge, histogram) — không phải log event. Nó gom các metric có cùng tên và tags trong mỗi cửa sổ thời gian: counter được cộng lại, gauge giữ giá trị mới nhất, sau đó một event tổng hợp được emit ra cuối mỗi chu kỳ.
+
+```yaml
+# vector.yaml — gom metric theo 60 giây: syslog → remap → aggregate → console
+sources:
+  syslog_in:
+    type: syslog
+    mode: udp
+    address: "0.0.0.0:514"
+
+transforms:
+  parse_syslog:
+    type: remap
+    inputs:
+      - syslog_in
+    source: |
+      . |= parse_syslog!(string!(.message))
+
+  count_per_minute:
+    type: aggregate
+    inputs:
+      - parse_syslog
+    interval_ms: 60000   # gom metric trong 60 giây, sau đó emit 1 event tổng hợp
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - count_per_minute
+    encoding:
+      codec: json
+```
+
+> **Khi nào dùng:** Khi bạn nhận nhiều metric event cùng tên từ nhiều nguồn và muốn giảm số event gửi đến sink bằng cách gom chúng lại theo khoảng thời gian. Giúp giảm chi phí lưu trữ và giảm tải cho sink. Lưu ý: `aggregate` dành cho metric event — nếu cần gom nhiều log line thành một event duy nhất, dùng `reduce` thay thế.
+
+> **Ví dụ thực tế:** Thay vì ghi mỗi counter event riêng lẻ vào Prometheus, dùng `aggregate` với `interval_ms: 10000` để gom counter trong 10 giây thành một giá trị tổng — giảm số lần ghi xuống đáng kể mà không mất thông tin quan trọng.
+
+---
+
+### 6.5 sample — Lấy mẫu giảm volume
+
+`sample` giữ lại 1 trong N event ngẫu nhiên, bỏ phần còn lại. Dùng khi volume log quá cao và bạn chấp nhận mất một phần data không quan trọng để tiết kiệm chi phí lưu trữ và băng thông.
+
+Trường `rate` xác định tỉ lệ: `rate: 10` nghĩa là giữ 1 event trong 10 — tức 10% data được giữ lại, 90% bị bỏ. `rate: 1` giữ tất cả (không sample). `rate: 100` chỉ giữ 1%.
+
+```yaml
+# vector.yaml — sample 10% request thành công: file → remap → sample → console
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access
+    source: |
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  sample_ok_requests:
+    type: sample
+    inputs:
+      - parse_nginx               # nhận event từ transform "parse_nginx"
+    rate: 10                      # giữ lại 1 event trong 10 (10% data)
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - sample_ok_requests
+    encoding:
+      codec: json
+```
+
+> **Khi nào dùng:** Log 200 OK chiếm 95% volume nhưng ít giá trị debug trong điều kiện bình thường. Kết hợp `route` và `sample`: dùng `route` để tách luồng lỗi và luồng thành công, giữ 100% event lỗi, áp `sample` lên luồng thành công với `rate: 10` để chỉ giữ 10%. Nhờ đó bạn không bỏ sót lỗi nào trong khi vẫn giảm đáng kể chi phí lưu trữ.
+
+> **Ví dụ thực tế:** Một API gateway nhận 50.000 request/phút; 48.000 là 200 OK, 2.000 là lỗi. Nếu bạn sample OK requests ở `rate: 10`, bạn chỉ lưu khoảng 4.800 OK log/phút thay vì 48.000 — tiết kiệm 90% storage cho phần data ít giá trị nhất — trong khi vẫn giữ toàn bộ 2.000 error log/phút để debug.
+
+---
+
+### 6.6 dedupe — Loại bỏ event trùng lặp
+
+`dedupe` bỏ qua event trùng lặp dựa trên giá trị của các field chỉ định. Khi hai event có cùng giá trị ở các field được liệt kê trong `fields.match`, event thứ hai bị bỏ qua. Transform dùng bộ nhớ đệm LRU (Least Recently Used cache) có kích thước giới hạn — mặc định 5000 event.
+
+Giới hạn này có nghĩa là: `dedupe` chỉ hoạt động tốt với **duplicate liên tiếp hoặc gần nhau về thời gian**. Nếu hai event giống hệt nhau nhưng cách nhau hơn 5000 event khác, bộ nhớ đệm sẽ đã bị đẩy ra và event thứ hai sẽ được coi là mới.
+
+```yaml
+# vector.yaml — loại bỏ duplicate request: file → remap → dedupe → console
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access
+    source: |
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  remove_duplicates:
+    type: dedupe
+    inputs:
+      - parse_nginx               # nhận event từ transform "parse_nginx"
+    fields:
+      match:
+        - client                  # nếu cùng IP...
+        - request                 # ...và cùng request...
+        - status                  # ...và cùng status thì bỏ event trùng
+
+sinks:
+  out:
+    type: console
+    inputs:
+      - remove_duplicates
+    encoding:
+      codec: json
+```
+
+> **Khi nào dùng:** Khi client retry và gửi cùng một request nhiều lần liên tiếp, hoặc khi Vector restart và đọc lại phần cuối file log gây ra duplicate trong thời gian ngắn. Không thích hợp để phát hiện duplicate phân tán qua thời gian dài — bộ nhớ đệm có giới hạn và trạng thái mất khi Vector restart.
+
+> **Ví dụ thực tế:** Một script gặp lỗi và retry liên tục, gửi cùng một HTTP request thất bại 20 lần trong 5 giây. Thay vì ghi 20 event giống hệt nhau vào Loki, `dedupe` với `fields.match: [client, request, status]` chỉ giữ lại event đầu tiên và bỏ 19 event còn lại — giảm noise trong log khi debug.
 
 ---
 
