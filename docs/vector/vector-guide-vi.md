@@ -89,7 +89,7 @@ Khi Vector đọc một dòng log từ file, nó tạo ra một log event với 
 }
 ```
 
-Field `.message` chứa nội dung thô của dòng log. Các transform — đặc biệt là `remap` dùng ngôn ngữ VRL (Vector Remap Language) — giúp bạn tách `.message` thành các field có ý nghĩa như `.status`, `.path`, `.remote_addr`. Trong VRL, bạn truy cập field bằng ký hiệu dấu chấm: `.message`, `.status`, `.timestamp`. Toàn bộ event được biểu diễn bằng dấu chấm `.` (dot) — khi bạn gán `. = ...` nghĩa là bạn đang thay thế toàn bộ event.
+Field `.message` chứa nội dung thô của dòng log. Các transform — đặc biệt là `remap` dùng ngôn ngữ VRL (Vector Remap Language) — giúp bạn tách `.message` thành các field có ý nghĩa như `.status`, `.request`, `.client`. Trong VRL, bạn truy cập field bằng ký hiệu dấu chấm: `.message`, `.status`, `.timestamp`. Toàn bộ event được biểu diễn bằng dấu chấm `.` (dot) — khi bạn gán `. = ...` nghĩa là bạn đang thay thế toàn bộ event.
 
 Ví dụ config tối giản: đọc nginx log, parse thành các field rời rạc, rồi xem kết quả trên stdout:
 
@@ -182,7 +182,7 @@ sinks:
       codec: json                       # in ra JSON để thấy các field syslog đã được parse
 ```
 
-> **Ví dụ thực tế:** Một server nginx ghi log vào `/var/log/nginx/access.log`. Vector dùng source `file` để theo dõi file đó liên tục (giống `tail -f`) và tạo một event cho mỗi dòng mới. Event chứa dòng log thô trong field `.message` — các transform phía sau sẽ parse `.message` thành các field có cấu trúc như `.status`, `.path`, `.client`.
+> **Ví dụ thực tế:** Một server nginx ghi log vào `/var/log/nginx/access.log`. Vector dùng source `file` để theo dõi file đó liên tục (giống `tail -f`) và tạo một event cho mỗi dòng mới. Event chứa dòng log thô trong field `.message` — các transform phía sau sẽ parse `.message` thành các field có cấu trúc như `.status`, `.request`, `.client`.
 
 ---
 
