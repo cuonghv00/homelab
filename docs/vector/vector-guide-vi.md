@@ -565,12 +565,110 @@ sinks:
 
 ## 7. Viết Vector Config từ đầu
 
-> *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+Một file `vector.yaml` có cấu trúc ba khối song song ở cùng cấp: `sources`, `transforms`, và `sinks`. Không có thứ bậc hay wrapper bên ngoài — ba khối này đều là key ở cấp cao nhất của file YAML. Các component trong từng khối kết nối với nhau qua trường `inputs`: mỗi transform hoặc sink khai báo tên của component phía trước mà nó nhận dữ liệu từ đó. Vector đọc toàn bộ file, xây dựng đồ thị kết nối, rồi kiểm tra tính hợp lệ trước khi bắt đầu chạy — nếu có tên component nào sai, Vector từ chối khởi động và in ra lỗi rõ ràng.
+
+**Quy trình viết config 5 bước:**
+
+1. **Xác định nguồn dữ liệu** — log từ đâu? (file, syslog, HTTP?) → chọn source type
+2. **Xác định đích** — gửi đi đâu? (Loki, Elasticsearch, file?) → chọn sink type
+3. **Xác định biến đổi cần thiết** — cần parse không? Lọc gì? Phân luồng không? → chọn transform(s)
+4. **Kết nối bằng `inputs`** — mỗi transform/sink khai báo nó lấy data từ component nào
+5. **Test với `console` sink** — thêm sink console tạm thời để xem event trước khi dùng sink thật
+
+**Ví dụ hoàn chỉnh: đọc nginx log, lọc lỗi, gửi vào Loki với sampling**
+
+Bài toán: đọc nginx access log, tách riêng lỗi 5xx, gửi toàn bộ lỗi vào Loki và chỉ gửi 20% traffic bình thường (để tiết kiệm lưu trữ).
+
+```yaml
+# vector.yaml — bài toán: đọc nginx log, lọc lỗi, gửi vào Loki với sampling
+# Luồng: nginx_access → parse_nginx → split_errors
+#                                    ├─ errors  → loki_errors
+#                                    └─ normal  → sample_normal → loki_normal
+
+sources:
+  nginx_access:
+    type: file                          # đọc từ file trên disk như tail -f
+    include:
+      - /var/log/nginx/access.log       # đường dẫn file log nginx
+
+transforms:
+  # Bước 1: parse dòng log thô thành fields có cấu trúc
+  parse_nginx:
+    type: remap
+    inputs:
+      - nginx_access                    # nhận event thô từ source
+    source: |
+      # parse_nginx_log! tách .message thành các field rời rạc:
+      # .client, .request, .status, .size, .referer, .agent, ...
+      . = parse_nginx_log!(string!(.message), format: "combined")
+
+  # Bước 2: tách thành hai luồng — lỗi 5xx và traffic bình thường
+  split_errors:
+    type: route
+    inputs:
+      - parse_nginx                     # nhận event đã parse từ bước 1
+    route:
+      errors: '.status >= 500'          # output: split_errors.errors
+      normal: '.status < 500'           # output: split_errors.normal
+
+  # Bước 3: sample luồng bình thường để giảm volume (giữ 20%)
+  sample_normal:
+    type: sample
+    inputs:
+      - split_errors.normal             # chỉ sample luồng bình thường, không đụng đến lỗi
+    rate: 5                             # giữ 1 trong 5 event = 20% data
+
+sinks:
+  # Lỗi 5xx: gửi tất cả vào Loki — không sample để không bỏ sót lỗi nào
+  loki_errors:
+    type: loki
+    inputs:
+      - split_errors.errors             # nhận từ route output "errors"
+    endpoint: "http://loki:3100"
+    encoding:
+      codec: json
+    labels:
+      app: nginx
+      severity: error                   # label Loki để lọc theo loại log trong Grafana
+
+  # Traffic bình thường: chỉ gửi 20% sample vào Loki để tiết kiệm lưu trữ
+  loki_normal:
+    type: loki
+    inputs:
+      - sample_normal                   # nhận từ transform sample_normal
+    endpoint: "http://loki:3100"
+    encoding:
+      codec: json
+    labels:
+      app: nginx
+      severity: info                    # label riêng để phân biệt với lỗi trong Grafana
+```
+
+> **Ví dụ thực tế:** Bắt đầu với pipeline đơn giản nhất (source → console sink), xác nhận data đang chảy qua và event trông đúng như mong đợi, rồi từng bước thêm transforms. Đừng cố viết pipeline phức tạp ngay từ đầu — thêm một transform, chạy thử, kiểm tra output console, rồi mới thêm transform tiếp theo. Khi output đã đúng, thay `type: console` bằng sink thật.
 
 ---
 
 ## 8. Bảng quyết định: Chọn transform nào?
 
-> *Nội dung chương này sẽ được hoàn thiện trong phần tiếp theo.*
+Khi đối mặt với một bài toán xử lý log, câu hỏi đầu tiên thường là: "Nên dùng transform nào?" Bảng dưới đây tổng hợp các tình huống phổ biến và transform phù hợp, kèm lý do ngắn gọn để bạn ra quyết định nhanh mà không cần đọc lại toàn bộ tài liệu.
+
+| Tình huống | Transform | Lý do |
+|---|---|---|
+| Log thô cần parse thành fields có cấu trúc | `remap` | VRL có sẵn hàm: `parse_nginx_log!`, `parse_syslog!`, `parse_json!` |
+| Thêm/sửa/xóa field trong event | `remap` | VRL expression: `.field = value`, `del(.field)` |
+| Chỉ muốn giữ một loại event, bỏ phần còn lại | `filter` | Event bị bỏ hoàn toàn — không gửi đi đâu cả |
+| Muốn gửi event đến nhiều sink khác nhau | `route` | Mỗi route là output riêng (`tên_transform.tên_route`) |
+| Volume quá cao, muốn giảm bằng lấy mẫu | `sample` | Giữ 1/N event; dùng sau `route` để không mất event quan trọng |
+| Muốn đếm/tổng hợp metric theo khoảng thời gian | `aggregate` | Chỉ cho metric event; dùng kết hợp với `internal_metrics` source |
+| Gom nhiều event liên quan thành một | `reduce` | Dùng khi nhiều dòng log thuộc 1 transaction |
+| Log bị duplicate do retry hoặc restart | `dedupe` | So sánh theo field chỉ định; chỉ hiệu quả với duplicate gần nhau |
+| Cần làm nhiều việc phức tạp cùng lúc | Nhiều `remap` nối tiếp | Chia nhỏ: mỗi remap một việc, dễ debug hơn |
+
+**Nguyên tắc chung:**
+
+- Bắt đầu với `remap` — nó giải quyết được 80% nhu cầu
+- Kết hợp `route` + `filter` để kiểm soát luồng event
+- Dùng `sample` ở cuối pipeline (sau khi đã parse và route) để không mất event quan trọng
+- `dedupe` và `aggregate` thường dùng ở các pipeline chuyên biệt, không phải mặc định
 
 ---
