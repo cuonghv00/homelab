@@ -104,7 +104,7 @@ Batch được flush khi ĐẠT BẤT KỲ điều kiện nào:
 | `snappy` | ~2-3x | Rất thấp | Rất nhanh | Throughput cực cao, latency nhạy cảm |
 | `none` | 1x | Không | Nhất | Local testing, very low volume |
 
-> **Recommendation:** Dùng `zstd` cho Kafka producer. Kafka broker tự động decompress và không forward compression sang consumers — consumer sẽ nhận data không nén từ broker (broker decompresses và re-serves theo cấu hình của consumer fetch). Tất cả 10+ Kafka producers trong production configs đều dùng `compression: zstd`.
+> **Recommendation:** Dùng `zstd` cho Kafka producer. librdkafka (Kafka client tích hợp trong Vector) tự động decompress batch nhận từ broker — Vector không cần cấu hình thêm gì về compression phía consumer. Broker giữ nguyên compressed batches và chỉ forward chúng tới consumer. Tất cả 10+ Kafka producers trong production configs đều dùng `compression: zstd`.
 
 ### 1.2 Consumer (Aggregator Side)
 
@@ -213,6 +213,8 @@ ES 8.x bỏ hoàn toàn type mapping — `api_version: v8` disable `_type` field
 
 Production configs: mix giữa `v8` (nginx, napas, kong, cdcn, uat_kpp, transaction, app4) và `auto` (haproxy, vault, epass, mariadb, mskpp) tùy thuộc vào ES cluster version.
 
+> **Pitfall:** Dùng `api_version: auto` có thể fail lúc startup nếu ES chưa sẵn sàng để respond version negotiation request. Với production, nên pin version cụ thể (`v8` cho ES 8.x) để tránh startup race condition.
+
 ### `compression: gzip`
 
 **Verified from docs (ES sink compression):**
@@ -222,6 +224,8 @@ Production configs: mix giữa `v8` (nginx, napas, kong, cdcn, uat_kpp, transact
 - Tất cả algorithms dùng default compression level
 
 Production pattern: hầu hết dùng `gzip` — được ES native support và không cần decompress riêng. Một số configs dùng `none` (haproxy, vault prod) — có thể do bandwidth không phải bottleneck hoặc ES cluster ở cùng network.
+
+> **Trade-off:** `gzip` tăng CPU ~10-30% trên aggregator (tùy throughput), nhưng giảm network bandwidth 60-70% khi gửi lên ES. Với throughput < 10MB/s, overhead không đáng kể. Với throughput > 100MB/s, cân nhắc monitor CPU trước khi enable.
 
 ### `batch` — ES producer side
 
@@ -235,6 +239,8 @@ Production pattern: hầu hết dùng `gzip` — được ES native support và 
 > Production configs dùng **5MB** (thay vì default 10MB) và **3 giây** (thay vì default 1 giây) — đây là "balanced default" cho throughput vs latency vs ES cluster load.
 >
 > ES khuyến nghị bulk request size 5–15MB. Nhỏ hơn = nhiều HTTP requests hơn = overhead cao. Lớn hơn = ES phải buffer nhiều hơn, tăng GC pressure trên JVM heap.
+
+> **Pitfall:** `max_bytes` được tính trên uncompressed event size. Nếu dùng `compression: gzip`, batch thực sự gửi lên ES có thể nhỏ hơn nhiều so với 5MB. Điều này không ảnh hưởng đến correctness, nhưng ES bulk request nhỏ hơn mong đợi.
 
 ### `request.concurrency`
 
@@ -257,6 +263,8 @@ Production pattern: hầu hết dùng `gzip` — được ES native support và 
 **Production observation:** 12+ aggregators dùng `concurrency: 2`. Chỉ `cdcn_aggregator` và `clickhouse_ag` dùng `adaptive` — cả hai đều có ES/ClickHouse load biến động.
 
 > **Recommendation:** Với ES cluster dedicated cho logging, `concurrency: 2` là điểm bắt đầu tốt. Tăng lên 4–8 nếu ES có đủ resources và throughput cần thiết. Dùng `adaptive` nếu ES có variable load patterns.
+
+> **Pitfall:** Tăng `concurrency` quá cao (> 8) mà ES cluster không có đủ thread pool có thể dẫn đến `TOO_MANY_REQUESTS` (429) errors. Vector sẽ retry, nhưng nếu cluster đang overloaded thì concurrency cao làm tình hình tệ hơn. Với `adaptive`, Vector tự giảm khi detect backpressure — đây là lý do `adaptive` an toàn hơn cho trường hợp không biết capacity.
 
 ### `request.timeout_secs: 30`
 
