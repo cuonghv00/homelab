@@ -220,8 +220,9 @@ parsed = parse_json!(.message)
 # object(x): nếu x là object thì return x, nếu không thì error
 # ?? {}: nếu object() error (parsed không phải object), dùng {} thay vì abort
 
-# Pattern B: merge() function — tương đương nhưng tường minh hơn
+# Pattern B: merge() function — tường minh hơn, dùng khi cần error check riêng
 parsed_log, err = parse_regex(.message, r'...')
+if err != null { abort }   # kiểm tra err trước khi merge — parse fail → parsed_log là null
 . = merge(., parsed_log)
 # merge() là infallible — luôn trả về object, không cần unwrap hay !
 
