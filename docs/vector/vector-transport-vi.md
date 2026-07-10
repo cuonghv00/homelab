@@ -389,7 +389,7 @@ ClickHouse `DateTime` column cần Unix timestamp integer. Nếu dùng ISO8601 s
 | `timeout_secs` | 3 | 5 | CH cần thêm thời gian insert |
 | `concurrency` | 2 (fixed) | adaptive | CH load biến động hơn ES |
 
-> **Verified from docs:** ClickHouse INSERT tốt với nhiều batch nhỏ hơn là ít batch lớn. Khuyến nghị: 100–1,000 rows per insert là tối ưu; không nên vượt quá 10,000 rows hoặc 10MB per insert để tránh memory spike và CH reject.
+> **Verified from docs:** ClickHouse INSERT tốt với nhiều batch nhỏ hơn là ít batch lớn. Khuyến nghị: 100–10,000 rows per insert là tối ưu; không nên vượt quá 100,000 rows hoặc 10MB per insert để tránh memory spike và CH reject.
 
 > **Pitfall / Trade-off:** `skip_unknown_fields: true` là safety net, không phải giải pháp lâu dài. Nếu log schema thay đổi thường xuyên, nên update ClickHouse table definition trước khi deploy — fields bị bỏ qua silently sẽ không xuất hiện trong CH và không có error nào được throw.
 
@@ -400,7 +400,7 @@ ClickHouse `DateTime` column cần Unix timestamp integer. Nếu dùng ISO8601 s
 Trong Agent→Kafka→Aggregator pipeline, compression được dùng ở 2 chỗ khác nhau với codec khác nhau:
 
 ```
-[Agent] ──zstd──► [Kafka] ──(Kafka tự decompress)──► [Aggregator] ──gzip──► [ES/CH]
+[Agent] ──zstd──► [Kafka] ──(Aggregator tự decompress)──► [Aggregator] ──gzip──► [ES/CH]
 ```
 
 ### Agent → Kafka: `zstd`
