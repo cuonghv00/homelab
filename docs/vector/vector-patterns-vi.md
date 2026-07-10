@@ -396,16 +396,184 @@ Fan-in hữu ích khi cùng loại log đến từ nhiều nguồn (file + netwo
 
 ## 3. Error Handling Strategy
 
-> _Nội dung sẽ được bổ sung trong Task 4._
+### 3.1 `drop_on_error: true` — Tác dụng và Giới hạn
+
+```yaml
+transforms:
+  access_log_transform:
+    type: remap
+    inputs: [access_log]
+    drop_on_error: true   # ← đặt ở cấp transform, không phải trong VRL
+    source: |
+      parsed_log, err = parse_regex(.message, r'...')
+      if err != null {
+        log("Parse failed: " + string!(.message), level: "warn")
+        abort
+      }
+      . = merge(., parsed_log)
+```
+
+Khi `drop_on_error: true`:
+- Event nào gây ra `abort` trong VRL sẽ bị **drop hoàn toàn** — không gửi tới sink
+- Không có `dead letter queue` mặc định — event biến mất
+- Vector vẫn chạy bình thường, không crash khi event bị drop
+
+Khi `drop_on_error: false` (default):
+- Event lỗi được chuyển tới sink kèm metadata lỗi
+- Tốt cho debug nhưng có thể gây ES index conflict
+
+### 3.2 Pre-Parse Content Filter
+
+Lọc event TRƯỚC khi parse để tiết kiệm CPU. Đặc biệt hữu ích khi source gửi nhiều loại event khác nhau qua cùng một channel.
+
+```vrl
+# HAProxy gửi cả Prometheus metrics (PROMEX) và access log qua syslog
+# Lọc PROMEX trước khi parse JSON — tránh parse tốn CPU
+if contains(string!(.message), "PROMEX") {
+    abort
+}
+
+# Tiếp tục parse nếu không phải PROMEX
+parsed = parse_json!(to_string!(.message))
+. |= object(parsed) ?? {}
+```
+
+Pattern: **filter → parse**, không **parse → filter**.
+
+> **Trade-off:** `contains(string!(.message), "X")` đơn giản và nhanh nhưng là substring match. Nếu cần filter phức tạp (regex match, multiple conditions), dùng `filter` transform thay vì `abort` trong `remap`.
+
+### 3.3 Structured Error Logging
+
+```vrl
+# Log lỗi kèm nội dung event để debug — trước khi abort
+parsed_log, err = parse_regex(.message, r'...')
+if err != null {
+  log("Unable to parse access log: " + string!(.message), level: "warn")
+  abort
+}
+
+# Với numeric conversion — log giá trị gây lỗi
+.bytes_sent, err = to_int(.bytes_sent)
+if err != null {
+  log("Unable to parse bytes_sent: " + string!(.bytes_sent), level: "warn")
+  abort
+}
+```
+
+`log()` ghi vào Vector's internal log (xuất ra stdout/stderr của Vector process). Xem log bằng `journalctl -u vector` hoặc container logs.
+
+> **Pitfall:** `log()` không ghi vào sink — đây là internal diagnostic log, không phải log event. Không dùng `log()` để track business metrics.
 
 ---
 
 ## 4. File Source: Fingerprinting & Tracking
 
-> _Nội dung sẽ được bổ sung trong Task 4._
+### 4.1 `checksum` vs `device_and_inode`
+
+Vector cần track xem đã đọc đến đâu trong file (checkpoint). Khi file bị rotate, Vector dùng fingerprint để nhận ra đây là file mới.
+
+```yaml
+# checksum: đọc N bytes đầu file, tính hash
+# Dùng cho file rotate (file bị truncate hoặc move, file mới tạo)
+sources:
+  nginx_access:
+    type: file
+    include: [/var/log/nginx/access.log]
+    fingerprint:
+      strategy: checksum
+      ignored_header_bytes: 5   # Bỏ qua 5 bytes đầu (vd: BOM, prefix)
+      lines: 20                 # Đọc 20 dòng đầu để tính fingerprint
+
+# device_and_inode: track bằng OS device number + inode number
+# Dùng cho file stable, không rotate (hoặc rotate bằng cách rename)
+sources:
+  vault_audit:
+    type: file
+    include: [/u01/logs/vault/vault_audit.log]
+    fingerprint:
+      strategy: device_and_inode
+```
+
+| Strategy | Khi nào dùng | Rủi ro |
+|---|---|---|
+| `checksum` | File rotate (logrotate copytruncate, Docker log rotation) | Nếu N dòng đầu thay đổi, Vector coi đây là file mới → đọc lại từ đầu |
+| `device_and_inode` | File stable hoặc rotate bằng rename (logrotate default) | Nếu filesystem thay đổi (remount, migration), inode reset → đọc lại |
+
+`ignored_header_bytes: 5`: bỏ qua N bytes đầu file khi tính checksum. Hữu ích khi log rotation tool thêm header/prefix vào file mới.
+
+### 4.2 `ignore_older_secs` và `ignore_not_found`
+
+```yaml
+sources:
+  app_log:
+    type: file
+    include: [/var/log/app/*.log]
+    ignore_older_secs: 600     # Bỏ qua file không có modification trong 10 phút
+    ignore_not_found: true     # Không báo lỗi nếu path chưa tồn tại
+```
+
+- `ignore_older_secs: 600`: tránh đọc lại log cũ khi Vector restart. Nếu server bị down 30 phút rồi restart, Vector sẽ bỏ qua log từ trước khi down.
+- `ignore_not_found: true`: cho phép path trong `include` chưa tồn tại — Vector sẽ poll và bắt đầu đọc khi file được tạo.
+
+> **Trade-off:** `ignore_older_secs` tiện nhưng có thể bỏ sót log nếu service down lâu và bạn muốn recover. Trong trường hợp đó, set `ignore_older_secs` lớn hơn hoặc tạm thời xóa checkpoint của Vector.
+
+### 4.3 `multiline` Configuration Fields
+
+Xem Section 1.3 cho ví dụ. Đây là reference nhanh cho các fields:
+
+| Field | Type | Mô tả |
+|---|---|---|
+| `start_pattern` | regex | Regex khớp với dòng ĐẦU TIÊN của block mới |
+| `condition_pattern` | regex | Regex xác định điều kiện gom/kết thúc (tùy `mode`) |
+| `mode` | enum | Cách interpret `condition_pattern` |
+| `timeout_ms` | integer | Flush block sau N ms nếu không có dòng mới |
+
+> **Pitfall:** `multiline` chỉ hoạt động khi lines đến tuần tự từ cùng một file. Nếu dùng globbing (`*.log`) và nhiều files cùng ghi đồng thời, lines từ các files có thể xen kẽ → sai block boundaries.
 
 ---
 
 ## 5. Self-Monitoring
 
-> _Nội dung sẽ được bổ sung trong Task 4._
+### 5.1 `internal_metrics` Source
+
+Vector có thể export metrics về chính nó (throughput, error rate, buffer size...) qua source `internal_metrics`.
+
+```yaml
+sources:
+  vector_internal_metrics:
+    type: internal_metrics
+    scrape_interval_secs: 30   # Thu thập metrics mỗi 30 giây
+```
+
+### 5.2 `prometheus_exporter` Sink
+
+Expose metrics cho Prometheus scrape. Điểm đặc biệt: sink này có thể nhận cả `internal_metrics` lẫn transform outputs (component-level throughput).
+
+```yaml
+sinks:
+  vector_metrics_sink:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal_metrics        # Vector self metrics
+      - mariadb_slow_log_transform     # Transform throughput metrics
+      - mariadb_error_log_transform    # Transform error rate
+      - mariadb_innodb_log_transform
+    address: "0.0.0.0:21039"          # Prometheus scrape endpoint
+```
+
+Khi thêm transform vào `inputs` của `prometheus_exporter`, Vector tự động expose các counter metrics như `component_received_events_total`, `component_sent_events_total`, `component_errors_total` cho từng component.
+
+### 5.3 Grafana Dashboard
+
+Sau khi Prometheus scrape endpoint `:21039`, thêm Prometheus data source vào Grafana và import dashboard từ Grafana.com (search "Vector" trên https://grafana.com/grafana/dashboards/).
+
+Key metrics để monitor:
+
+| Metric | Ý nghĩa | Alert khi |
+|---|---|---|
+| `component_errors_total` | Số event bị drop do parse error | > 1% của throughput |
+| `component_received_events_total` | Input throughput | Drop đột ngột |
+| `component_sent_events_total` | Output throughput | Lag so với received |
+| `buffer_events` | Số event đang buffer | Tăng liên tục (backpressure) |
+
+> **Pitfall:** `prometheus_exporter` giữ metrics trong memory. Nếu Vector restart, counter reset về 0. Dùng Prometheus `increase()` function thay vì `rate()` để tránh false alerts khi restart.
