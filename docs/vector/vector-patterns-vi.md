@@ -422,6 +422,8 @@ Khi `drop_on_error: false` (default):
 - Event lỗi được chuyển tới sink kèm metadata lỗi
 - Tốt cho debug nhưng có thể gây ES index conflict
 
+> **Pitfall:** Không có built-in dead letter queue trong Vector. Event bị drop hoàn toàn và không thể recover nếu không có external logging. Để debug, tạm thời set `drop_on_error: false` trong môi trường staging để xem event nào bị lỗi.
+
 ### 3.2 Pre-Parse Content Filter
 
 Lọc event TRƯỚC khi parse để tiết kiệm CPU. Đặc biệt hữu ích khi source gửi nhiều loại event khác nhau qua cùng một channel.
@@ -501,6 +503,8 @@ sources:
 
 `ignored_header_bytes: 5`: bỏ qua N bytes đầu file khi tính checksum. Hữu ích khi log rotation tool thêm header/prefix vào file mới.
 
+> **Pitfall:** Khi dùng `checksum`, Vector đọc N dòng đầu file khi khởi động để tạo fingerprint. Nếu log rotation xảy ra khi Vector đang offline, Vector có thể nhận nhầm file mới là file cũ (nếu N dòng đầu giống nhau). Tăng `lines` lên để giảm xác suất collision.
+
 ### 4.2 `ignore_older_secs` và `ignore_not_found`
 
 ```yaml
@@ -545,23 +549,24 @@ sources:
     scrape_interval_secs: 30   # Thu thập metrics mỗi 30 giây
 ```
 
+> **Pitfall:** `scrape_interval_secs` ảnh hưởng đến độ granularity của metrics. Nếu set quá cao (ví dụ 300s), Grafana rate() calculations có thể bị inaccurate. Giá trị 15–30s là phù hợp cho hầu hết production deployments.
+
 ### 5.2 `prometheus_exporter` Sink
 
-Expose metrics cho Prometheus scrape. Điểm đặc biệt: sink này có thể nhận cả `internal_metrics` lẫn transform outputs (component-level throughput).
+Expose metrics cho Prometheus scrape. Chỉ nhận **metric-type events** — log events bị drop silently nếu được thêm vào `inputs`.
 
 ```yaml
 sinks:
   vector_metrics_sink:
     type: prometheus_exporter
     inputs:
-      - vector_internal_metrics        # Vector self metrics
-      - mariadb_slow_log_transform     # Transform throughput metrics
-      - mariadb_error_log_transform    # Transform error rate
-      - mariadb_innodb_log_transform
+      - vector_internal_metrics        # Vector self metrics — đây là input duy nhất cần thiết
     address: "0.0.0.0:21039"          # Prometheus scrape endpoint
 ```
 
-Khi thêm transform vào `inputs` của `prometheus_exporter`, Vector tự động expose các counter metrics như `component_received_events_total`, `component_sent_events_total`, `component_errors_total` cho từng component.
+`internal_metrics` source tự động emit counter metrics ở cấp component — `component_received_events_total`, `component_sent_events_total`, `component_errors_total` — cho **mọi** component trong pipeline (sources, transforms, sinks). Operator **không cần** thêm transform vào `inputs` của `prometheus_exporter` để lấy các metrics này; chỉ cần `vector_internal_metrics` là đủ. Thêm log-producing transforms (remap, filter...) vào `inputs` là sai — log events không phải metric-type và sẽ bị drop silently.
+
+> **Pitfall:** `prometheus_exporter` giữ metrics trong memory. Sau khi Vector restart, tất cả counter reset về 0 — Prometheus sẽ thấy counter giảm. Dùng `increase()` function trong PromQL thay vì `rate()` để tránh false positives khi restart.
 
 ### 5.3 Grafana Dashboard
 
